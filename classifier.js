@@ -1,3 +1,17 @@
+import Groq from 'groq-sdk';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const groq = new Groq({
+  apiKey: process.env.GROQ_API_KEY,
+});
+
+const CATEGORIES = [
+  'marketing', 'personal', 'work', 'receipts', 'newsletters',
+  'spam', 'social', 'finance', 'travel', 'shopping', 'other'
+];
+
 export async function classifyEmail(subject, body, from) {
     try {
       const response = await groq.chat.completions.create({

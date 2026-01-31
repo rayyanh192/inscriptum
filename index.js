@@ -1,10 +1,21 @@
-require('dotenv').config();
-const express = require('express');
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
-const Groq = require('groq-sdk');
+import dotenv from 'dotenv';
+import express from 'express';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
+import Groq from 'groq-sdk';
+import admin from 'firebase-admin';
+import fs from 'fs';
+
+dotenv.config();
 
 const app = express();
 app.use(express.json());
+
+// Initialize Firebase
+const serviceAccount = JSON.parse(fs.readFileSync('./firebase-service-account.json'));
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount)
+});
+const db = admin.firestore();
 
 // Initialize Groq
 const groq = new Groq({
@@ -30,6 +41,54 @@ const SYSTEM_PROMPT = `You are a helpful personal assistant. Have natural, frien
 
 let botReady = false;
 let notificationChannel = null;
+let lastCheckedTimestamp = Date.now(); // Track when we last checked for emails
+
+// Function to check for new emails in Firebase
+async function checkForNewEmails() {
+  try {
+    const snapshot = await db.collection('emails')
+      .where('processedAt', '>', new Date(lastCheckedTimestamp))
+      .orderBy('processedAt', 'asc')
+      .get();
+    
+    if (snapshot.empty) {
+      return;
+    }
+    
+    console.log(`📬 Found ${snapshot.size} new email(s)`);
+    
+    for (const doc of snapshot.docs) {
+      const email = doc.data();
+      
+      // Create notification message
+      const message = `📧 **New Email with Links!**\n` +
+        `**From:** ${email.from}\n` +
+        `**Subject:** ${email.subject}\n` +
+        `**Category:** ${email.category}\n` +
+        `**Links found:** ${email.linkCount}\n` +
+        `**Links:**\n${email.links.slice(0, 3).map(link => `• ${link}`).join('\n')}` +
+        (email.links.length > 3 ? `\n... and ${email.links.length - 3} more` : '');
+      
+      await notificationChannel.send(message);
+    }
+    
+    // Update last checked timestamp
+    lastCheckedTimestamp = Date.now();
+  } catch (error) {
+    console.error('Error checking for new emails:', error);
+  }
+}
+
+// Start monitoring for new emails every 5 seconds
+function startEmailMonitoring() {
+  console.log('🔄 Starting email monitoring (checking every 5 seconds)...');
+  
+  setInterval(async () => {
+    if (notificationChannel) {
+      await checkForNewEmails();
+    }
+  }, 5000); // Check every 5 seconds
+}
 
 client.once('ready', async () => {
   console.log(`Discord bot logged in as ${client.user.tag}`);
@@ -41,6 +100,9 @@ client.once('ready', async () => {
 
     // Send greeting
     await notificationChannel.send("Hey! I'm online and ready to chat. What's up?");
+    
+    // Start monitoring for new emails
+    startEmailMonitoring();
   } else {
     console.error('Could not find notification channel! Check DISCORD_CHANNEL_ID');
   }
