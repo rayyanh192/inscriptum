@@ -135,6 +135,71 @@ async def process_feedback_for_learning(feedback: Dict, db) -> None:
         if email_id:
             from .style_learning import learn_style_from_feedback
             await learn_style_from_feedback(email_id, feedback_data.get('changes', ''), db)
+    
+    elif feedback_type == 'implicit_behavior':
+        # Handle implicit behavior signals from email scraping
+        # (starred, read, archived, deleted, replied)
+        await process_implicit_behavior_feedback(feedback, db)
+
+
+@weave.op()
+async def process_implicit_behavior_feedback(feedback: Dict, db) -> None:
+    """
+    Process implicit behavior signals into learning updates.
+    
+    This is how the agent learns from ACTUAL user actions on emails,
+    not just explicit feedback. The scraper detects when user:
+    - Stars an email → high importance
+    - Deletes an email → spam/unwanted
+    - Replies to an email → needs response
+    - Archives an email → handled, low priority
+    """
+    signal = feedback.get('signal')
+    sender = feedback.get('sender', '')
+    importance_score = feedback.get('importance_score', 0)
+    
+    if not sender or not signal:
+        return
+    
+    # Update person importance based on signal
+    sender_key = sender.split('@')[0].lower().replace(' ', '_')[:50]
+    person_ref = db.collection('people').document(sender_key)
+    person_doc = person_ref.get()
+    
+    if person_doc.exists:
+        person = person_doc.to_dict()
+        current_importance = person.get('importance_score', 0.5)
+        
+        # Adjust importance based on signal
+        if signal in ['starred', 'replied']:
+            new_importance = min(1.0, current_importance + 0.1)
+        elif signal == 'deleted':
+            new_importance = max(0.0, current_importance - 0.2)
+        elif signal == 'archived':
+            new_importance = current_importance  # Neutral
+        elif signal == 'read':
+            new_importance = min(1.0, current_importance + 0.02)  # Slight boost
+        else:
+            new_importance = current_importance
+        
+        person_ref.update({
+            'importance_score': new_importance,
+            f'behavior_signal_{signal}': True,
+            'last_behavior_update': datetime.utcnow().isoformat()
+        })
+        
+        print(f"📊 Updated {sender_key} importance: {current_importance:.2f} → {new_importance:.2f} (signal: {signal})")
+    else:
+        # Create person record with initial importance
+        initial_importance = 0.7 if signal in ['starred', 'replied'] else 0.3 if signal == 'deleted' else 0.5
+        person_ref.set({
+            'email': sender,
+            'importance_score': initial_importance,
+            f'behavior_signal_{signal}': True,
+            'created_at': datetime.utcnow().isoformat(),
+            'created_from': 'implicit_behavior'
+        })
+        print(f"📊 Created person {sender_key} with importance {initial_importance} (signal: {signal})")
 
 
 @weave.op()
