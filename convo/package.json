@@ -1,10 +1,12 @@
 {
   "name": "inscriptum",
   "version": "1.0.0",
-  "description": "Discord bot with email processing",
-  "main": "index.js",
+  "description": "Self-learning email assistant with Discord bot frontend",
+  "main": "discord-bot.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node discord-bot.js",
+    "bot": "node discord-bot.js",
+    "old": "node index.js",
     "emails": "node --experimental-vm-modules email-processor.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

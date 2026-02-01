@@ -5,7 +5,11 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+const SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/gmail.modify'
+];
 const TOKEN_PATH = 'token.json';
 
 export async function authorize() {
