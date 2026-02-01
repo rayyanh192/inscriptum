@@ -6,6 +6,9 @@
 # Firebase credentials
 firebase-service-account.json
 
+# Tokens
+token.json
+
 # Node
 node_modules/
 package-lock.json
@@ -19,11 +22,11 @@ __pycache__/
 *.pyd
 .Python
 
-# OAuth tokens
-token.json
-
 # Test results
 test_results_*.json
+
+# Logs
+*.log
 
 # OS files
 .DS_Store
@@ -33,3 +36,5 @@ test_results_*.json
 # IDE
 .vscode/
 .idea/
+.DS_Store
+>>>>>>> b9a99f7a7f2dde5f087dfb81f467523839e62a19
