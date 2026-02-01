@@ -1,7 +1,12 @@
 import { google } from 'googleapis';
 import { authorize } from './auth.js';
 
-export async function fetchEmails(maxResults = 100) {
+export async function fetchEmails(maxResults = 100, options = {}) {
+  const {
+    includeThreadCheck = true,
+    bodyLimit = parseInt(process.env.EMAIL_BODY_LIMIT || '1000', 10),
+    sinceInternalDate = 0,
+  } = options;
   const auth = await authorize();
   const gmail = google.gmail({ version: 'v1', auth });
 
@@ -10,10 +15,18 @@ export async function fetchEmails(maxResults = 100) {
     const profile = await gmail.users.getProfile({ userId: 'me' });
     const userEmail = profile.data.emailAddress;
 
+    const queryParts = [];
+    if (sinceInternalDate) {
+      const afterSeconds = Math.floor(sinceInternalDate / 1000);
+      queryParts.push(`after:${afterSeconds}`);
+    }
+    const query = queryParts.length ? queryParts.join(' ') : undefined;
+
     // Get list of message IDs
     const res = await gmail.users.messages.list({
       userId: 'me',
       maxResults: maxResults,
+      q: query,
     });
 
     const messages = res.data.messages || [];
@@ -64,6 +77,10 @@ export async function fetchEmails(maxResults = 100) {
         }
       }
 
+      // Extract links from body (basic URL regex)
+      const linkRegex = /(https?:\/\/[^\s<>"]+[^\s<>",.!?()])/g;
+      const links = Array.from(new Set((body.match(linkRegex) || []).map(link => link.trim()))).slice(0, 10);
+
       const is_read = !labelIds.includes('UNREAD');
       const is_starred = labelIds.includes('STARRED');
       const is_deleted = labelIds.includes('TRASH');
@@ -82,7 +99,7 @@ export async function fetchEmails(maxResults = 100) {
 
       // Check if user has replied in this thread
       let has_reply = false;
-      if (email.data.threadId) {
+      if (includeThreadCheck && email.data.threadId) {
         try {
           const thread = await gmail.users.threads.get({
             userId: 'me',
@@ -105,7 +122,9 @@ export async function fetchEmails(maxResults = 100) {
         from,
         to,
         date,
-        body: body.slice(0, 1000), // Limit body length
+        body: body.slice(0, bodyLimit), // Limit body length
+        links,
+        link_count: links.length,
         timestamp: new Date(date).getTime(),
         
         // New behavior signals for training

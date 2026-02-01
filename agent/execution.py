@@ -19,7 +19,8 @@ async def store_decision(
     decision: dict,
     importance: Optional[Dict] = None,
     person_context: Optional[Dict] = None,
-    generated_response: Optional[Dict] = None
+    generated_response: Optional[Dict] = None,
+    automation_context: Optional[Dict] = None
 ) -> dict:
     """
     Store agent decision in Firebase 'agent_decisions' collection.
@@ -38,6 +39,7 @@ async def store_decision(
         importance: Optional importance prediction
         person_context: Optional person context
         generated_response: Optional generated response
+        automation_context: Optional automation context/state
     
     Returns:
         Dictionary with decision_id and timestamp
@@ -105,6 +107,10 @@ async def store_decision(
                 'body': generated_response.get('body'),
                 'key_points': generated_response.get('key_points_addressed', [])
             }
+
+        # Add automation context if provided
+        if automation_context:
+            decision_data['automation_context'] = automation_context
         
         # Store in Firebase
         doc_ref = db.collection('agent_decisions').document()

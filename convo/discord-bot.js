@@ -17,12 +17,13 @@
 
 import dotenv from 'dotenv';
 import express from 'express';
-import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, AttachmentBuilder } from 'discord.js';
 import Groq from 'groq-sdk';
 import admin from 'firebase-admin';
 import fs from 'fs';
 import { sendEmail, replyToEmail } from './email-sender.js';
 import { fetchEmails } from './scraper.js';
+import { initAutomationSession, fillKnownFields, findMissingFields, attemptSubmit, summarizeCompletion } from './automation-service.js';
 
 dotenv.config();
 
@@ -53,10 +54,15 @@ const client = new Client({
   ],
   partials: [Partials.Channel],
 });
+client.on('error', (error) => {
+  console.error('Discord client error:', error);
+});
 
 let botReady = false;
 let notificationChannel = null;
 let lastCheckedTimestamp = Date.now();
+let scrapeBackoffMs = 0;
+let lastScrapedInternalDate = 0;
 
 // Track pending decisions awaiting user feedback
 const pendingDecisions = new Map();
@@ -68,8 +74,20 @@ const conversationHistory = new Map();
 const emailSearchCache = new Map();
 // Prevent duplicate message processing
 const processedMessages = new Set();
+// Track active automation sessions by decision ID
+const activeAutomations = new Map();
+// Track pending automation inputs by user ID
+const pendingAutomationInputs = new Map();
+// Cooldown tracker to reduce implicit feedback writes
+const implicitFeedbackCooldown = new Map();
 
 const MAX_HISTORY_LENGTH = 20; // Keep last 20 messages per user
+const SCRAPE_INTERVAL = parseInt(process.env.SCRAPE_INTERVAL_MS || '30000', 10);
+const SCRAPE_MAX_RESULTS = parseInt(process.env.SCRAPE_MAX_RESULTS || '10', 10);
+const SCRAPE_THREAD_CHECK = (process.env.SCRAPE_THREAD_CHECK || 'false').toLowerCase() === 'true';
+const BEHAVIOR_SYNC_INTERVAL_MS = parseInt(process.env.BEHAVIOR_SYNC_INTERVAL_MS || '300000', 10);
+const IMPLICIT_FEEDBACK_COOLDOWN_MS = parseInt(process.env.IMPLICIT_FEEDBACK_COOLDOWN_MS || '60000', 10);
+const MAX_SCRAPE_BACKOFF_MS = parseInt(process.env.MAX_SCRAPE_BACKOFF_MS || '300000', 10);
 
 // ============================================================
 // AGENT INTEGRATION - Call Python agent via Firebase
@@ -147,26 +165,32 @@ function ruleMatches(rule, email) {
  * Use LLM to make a decision when no learned rules apply
  */
 async function makeDecisionWithLLM(email) {
+  const links = email.links || [];
+  const hasLinks = links.length > 0;
+
   const prompt = `You are an email assistant. Analyze this email and decide what action to take.
 
 Email:
 - From: ${email.from}
 - Subject: ${email.subject}
 - Body: ${(email.body || '').slice(0, 500)}
+- Links: ${hasLinks ? links.slice(0, 3).join(', ') : 'none'}
 
 Analyze for:
 1. URGENCY: Is this time-sensitive? (dinner tonight, meeting soon, payment due, deadline, ASAP, urgent)
 2. IMPORTANCE: Does this require immediate attention?
+3. ACTIONABLE LINK: Is there a link that triggers an action like check-in, payment, signup, or form submission?
 
 Possible actions:
 - "reply" - Important email that needs a response (especially if urgent/time-sensitive)
 - "star" - Important but doesn't need immediate response
 - "archive" - Not important, can be archived
 - "ignore" - Spam or irrelevant
+- "automate" - Email contains an actionable link that can be completed in a browser
 
 Return JSON only:
 {
-  "action": "reply|star|archive|ignore",
+  "action": "reply|star|archive|ignore|automate",
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation",
   "is_urgent": true/false,
@@ -249,61 +273,94 @@ async function recordFeedback(decisionId, feedbackType, correctAction = null) {
 // ============================================================
 
 let lastScrapeTime = 0;
-const SCRAPE_INTERVAL = 5000; // Scrape every 5 seconds (for testing)
 
 /**
  * Scrape new emails from Gmail and add to Firebase
  * This runs every 5 seconds to keep the database up to date
  */
+function isQuotaError(error) {
+  const message = error?.message || '';
+  return (
+    /quota|resource_exhausted|exceeded/i.test(message) ||
+    error?.code === 8 ||
+    error?.code === 429
+  );
+}
+
 async function scrapeNewEmails() {
   const now = Date.now();
-  if (now - lastScrapeTime < SCRAPE_INTERVAL) return;
+  const effectiveInterval = Math.max(SCRAPE_INTERVAL, scrapeBackoffMs || 0);
+  if (now - lastScrapeTime < effectiveInterval) return;
   lastScrapeTime = now;
 
   console.log('📥 Scraping new emails from Gmail...');
   
   try {
-    const emails = await fetchEmails(20); // Fetch last 20 emails
+    const emails = await fetchEmails(SCRAPE_MAX_RESULTS, {
+      includeThreadCheck: SCRAPE_THREAD_CHECK,
+      sinceInternalDate: lastScrapedInternalDate,
+    });
     console.log(`📧 Found ${emails.length} emails`);
     let newCount = 0;
     let updatedCount = 0;
 
+    if (!emails.length) {
+      scrapeBackoffMs = 0;
+      return;
+    }
+
+    const docRefs = emails.map(email => db.collection('emails').doc(email.id));
+    const snapshots = await db.getAll(...docRefs);
+    const existingById = new Map(snapshots.map(snapshot => [snapshot.id, snapshot]));
+    let maxInternalDate = lastScrapedInternalDate;
+
     for (const email of emails) {
       const docRef = db.collection('emails').doc(email.id);
-      const existing = await docRef.get();
+      const existing = existingById.get(email.id);
+      maxInternalDate = Math.max(maxInternalDate, email.internal_date || 0);
 
-      if (!existing.exists) {
+      if (!existing || !existing.exists) {
         // New email - add it
-        await docRef.set({
-          ...email,
-          discord_notified: false,
-          agent_processed: false,
-          scraped_at: admin.firestore.FieldValue.serverTimestamp()
-        });
-        newCount++;
-        const sender = email.is_sent ? `TO: ${email.to}` : `FROM: ${email.from}`;
-        console.log(`  ✅ New email: "${(email.subject || '').slice(0, 30)}..." ${sender.slice(0, 40)}`);
-        
-        // ADD THE SENDER TO PEOPLE COLLECTION (only for received emails)
-        if (email.from && !email.is_sent) {
-          await addPersonFromEmail(email.from, 'received_email');
-        }
-        // Add recipient for sent emails
-        if (email.to && email.is_sent) {
-          await addPersonFromEmail(email.to, 'sent_email');
-        }
-        
-        // Check if this new email should trigger a notification
-        console.log(`  🔍 Checking if email should be notified...`);
         try {
-          // Process THIS specific email immediately instead of querying all recent ones
-          await checkAndNotifyEmail(email.id);
+          await docRef.set({
+            ...email,
+            discord_notified: false,
+            agent_processed: false,
+            scraped_at: admin.firestore.FieldValue.serverTimestamp(),
+            last_synced: now
+          });
+          newCount++;
+          const sender = email.is_sent ? `TO: ${email.to}` : `FROM: ${email.from}`;
+          console.log(`  ✅ New email: "${(email.subject || '').slice(0, 30)}..." ${sender.slice(0, 40)}`);
+
+          // ADD THE SENDER TO PEOPLE COLLECTION (only for received emails)
+          if (email.from && !email.is_sent) {
+            await addPersonFromEmail(email.from, 'received_email');
+          }
+          // Add recipient for sent emails
+          if (email.to && email.is_sent) {
+            await addPersonFromEmail(email.to, 'sent_email');
+          }
+
+          // Check if this new email should trigger a notification
+          console.log(`  🔍 Checking if email should be notified...`);
+          try {
+            // Process THIS specific email immediately instead of querying all recent ones
+            await checkAndNotifyEmail(email.id);
+          } catch (error) {
+            console.error(`  ❌ Error checking email for notification:`, error.message);
+          }
         } catch (error) {
-          console.error(`  ❌ Error checking email for notification:`, error.message);
+          if (isQuotaError(error)) {
+            scrapeBackoffMs = scrapeBackoffMs ? Math.min(scrapeBackoffMs * 2, MAX_SCRAPE_BACKOFF_MS) : Math.min(SCRAPE_INTERVAL * 2, MAX_SCRAPE_BACKOFF_MS);
+            console.warn(`⚠️  Firebase quota hit while writing. Backing off for ${Math.round(scrapeBackoffMs / 1000)}s.`);
+            break;
+          }
+          throw error;
         }
       } else {
         // Email exists - update behavior signals (read/starred/archived status may have changed)
-        const existingData = existing.data();
+        const existingData = existing.data() || {};
         const changed = (
           existingData.is_read !== email.is_read ||
           existingData.is_starred !== email.is_starred ||
@@ -312,21 +369,33 @@ async function scrapeNewEmails() {
           existingData.has_reply !== email.has_reply
         );
 
-        if (changed) {
-          await docRef.update({
-            is_read: email.is_read,
-            is_starred: email.is_starred,
-            is_archived: email.is_archived,
-            is_deleted: email.is_deleted,
-            has_reply: email.has_reply,
-            labels: email.labels,
-            last_synced: Date.now()
-          });
-          updatedCount++;
-          console.log(`  🔄 Updated: "${(email.subject || '').slice(0, 40)}..."`);
-          
-          // Record this as implicit feedback for training
-          await recordImplicitFeedback(email, existingData);
+        const lastSynced = existingData.last_synced || 0;
+        const shouldSync = now - lastSynced >= BEHAVIOR_SYNC_INTERVAL_MS;
+
+        if (changed && shouldSync) {
+          try {
+            await docRef.update({
+              is_read: email.is_read,
+              is_starred: email.is_starred,
+              is_archived: email.is_archived,
+              is_deleted: email.is_deleted,
+              has_reply: email.has_reply,
+              labels: email.labels,
+              last_synced: now
+            });
+            updatedCount++;
+            console.log(`  🔄 Updated: "${(email.subject || '').slice(0, 40)}..."`);
+
+            // Record this as implicit feedback for training
+            await recordImplicitFeedback(email, existingData);
+          } catch (error) {
+            if (isQuotaError(error)) {
+              scrapeBackoffMs = scrapeBackoffMs ? Math.min(scrapeBackoffMs * 2, MAX_SCRAPE_BACKOFF_MS) : Math.min(SCRAPE_INTERVAL * 2, MAX_SCRAPE_BACKOFF_MS);
+              console.warn(`⚠️  Firebase quota hit while updating. Backing off for ${Math.round(scrapeBackoffMs / 1000)}s.`);
+              break;
+            }
+            throw error;
+          }
         }
       }
     }
@@ -336,8 +405,14 @@ async function scrapeNewEmails() {
     } else {
       console.log(`   (no changes)`);
     }
+    lastScrapedInternalDate = Math.max(lastScrapedInternalDate, maxInternalDate);
+    scrapeBackoffMs = 0;
   } catch (error) {
     console.error('❌ Scrape error:', error.message);
+    if (isQuotaError(error)) {
+      scrapeBackoffMs = scrapeBackoffMs ? Math.min(scrapeBackoffMs * 2, MAX_SCRAPE_BACKOFF_MS) : Math.min(SCRAPE_INTERVAL * 2, MAX_SCRAPE_BACKOFF_MS);
+      console.warn(`⚠️  Backing off scraping for ${Math.round(scrapeBackoffMs / 1000)}s due to quota limits.`);
+    }
   }
 }
 
@@ -416,6 +491,13 @@ async function recordImplicitFeedback(newState, oldState) {
 
   // Save implicit feedback for each change AND update person importance
   for (const change of changes) {
+    const cooldownKey = `${newState.id}:${change.signal}`;
+    const lastRecorded = implicitFeedbackCooldown.get(cooldownKey);
+    if (lastRecorded && Date.now() - lastRecorded < IMPLICIT_FEEDBACK_COOLDOWN_MS) {
+      continue;
+    }
+    implicitFeedbackCooldown.set(cooldownKey, Date.now());
+
     await db.collection('training_feedback').add({
       email_id: newState.id,
       feedback_type: 'implicit_behavior',
@@ -617,7 +699,7 @@ async function checkAndNotifyEmail(emailId) {
     
     // PRIORITY NOTIFICATION LOGIC
     const isUrgent = decision.is_urgent || decision.is_time_sensitive;
-    const isImportant = decision.action === 'reply' || decision.action === 'star';
+    const isImportant = decision.action === 'reply' || decision.action === 'star' || decision.action === 'automate';
     const isHighConfidence = decision.confidence && decision.confidence > 0.7;
     
     const shouldNotify = isUrgent || isImportant || isHighConfidence;
@@ -698,7 +780,7 @@ async function checkForUnprocessedEmails() {
       // 2. Notify if needs reply or should be starred
       // 3. Notify if high confidence (>70%)
       const isUrgent = decision.is_urgent || decision.is_time_sensitive;
-      const isImportant = decision.action === 'reply' || decision.action === 'star';
+      const isImportant = decision.action === 'reply' || decision.action === 'star' || decision.action === 'automate';
       const isHighConfidence = decision.confidence && decision.confidence > 0.7;
       
       const shouldNotify = isUrgent || isImportant || isHighConfidence;
@@ -767,7 +849,8 @@ async function notifyUserAboutEmail(decisionId, decision) {
       reply: 0xFF6B6B,    // Red - needs response
       star: 0xFFE66D,     // Yellow - important
       archive: 0x4ECDC4,  // Teal - can archive
-      ignore: 0x95A5A6    // Gray - spam
+      ignore: 0x95A5A6,   // Gray - spam
+      automate: 0x5865F2  // Discord blurple - automation
     };
     embedColor = colors[action] || 0x7289DA;
   }
@@ -803,7 +886,22 @@ async function notifyUserAboutEmail(decisionId, decision) {
   // Build action buttons
   const row = new ActionRowBuilder();
 
-  if (action === 'reply') {
+  if (action === 'automate') {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`automate_${decisionId}`)
+        .setLabel('🤖 Do it for me')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`confirm_${decisionId}`)
+        .setLabel('✅ Correct')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`correct_${decisionId}`)
+        .setLabel('✏️ Change Action')
+        .setStyle(ButtonStyle.Secondary)
+    );
+  } else if (action === 'reply') {
     row.addComponents(
       new ButtonBuilder()
         .setCustomId(`draft_${decisionId}`)
@@ -836,6 +934,312 @@ async function notifyUserAboutEmail(decisionId, decision) {
   }
 
   await notificationChannel.send({ embeds: [embed], components: [row] });
+}
+
+// ============================================================
+// AUTOMATION (Browserbase + Stagehand)
+// ============================================================
+
+async function updateAutomationState(decisionId, emailId, updates) {
+  const timestamp = new Date().toISOString();
+  const record = {
+    decision_id: decisionId,
+    email_id: emailId,
+    updated_at: timestamp,
+    ...updates,
+  };
+
+  await db.collection('automation_runs').doc(decisionId).set(record, { merge: true });
+
+  if (emailId) {
+    const emailUpdates = {
+      automation_status: updates.status || updates.automation_status || 'unknown',
+      automation_updated_at: timestamp,
+    };
+    if (updates.session_id) emailUpdates.automation_session_id = updates.session_id;
+    if (updates.session_url) emailUpdates.automation_session_url = updates.session_url;
+    if (updates.debug_url) emailUpdates.automation_debug_url = updates.debug_url;
+    if (updates.pending_field) emailUpdates.automation_pending_field = updates.pending_field;
+    if (updates.summary) emailUpdates.automation_summary = updates.summary;
+    if (updates.error) emailUpdates.automation_error = updates.error;
+    await db.collection('emails').doc(emailId).set(emailUpdates, { merge: true });
+  }
+}
+
+async function extractActionLink(email) {
+  const linkRegex = /(https?:\/\/[^\s<>"]+[^\s<>",.!?()])/g;
+  const bodyLinks = (email.body || '').match(linkRegex) || [];
+  const candidateLinks = Array.from(new Set([...(email.links || []), ...bodyLinks])).slice(0, 10);
+
+  if (candidateLinks.length === 0) return null;
+  if (candidateLinks.length === 1) return candidateLinks[0];
+
+  const prompt = `Select the single most actionable link for completing a task in the browser.\n\nLinks:\n${candidateLinks.map((link, i) => `${i + 1}. ${link}`).join('\\n')}\n\nReturn JSON only: {\"index\": 1}`;
+  try {
+    const completion = await groq.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: 'llama-3.1-8b-instant',
+      temperature: 0,
+      max_tokens: 50,
+    });
+    const response = completion.choices[0]?.message?.content || '{}';
+    const jsonMatch = response.match(/\\{[\\s\\S]*\\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const index = Math.max(1, Math.min(candidateLinks.length, parseInt(parsed.index, 10) || 1));
+      return candidateLinks[index - 1];
+    }
+  } catch (error) {
+    console.error('Link extraction error:', error);
+  }
+
+  return candidateLinks[0];
+}
+
+async function advanceAutomation(automation, channel) {
+  await fillKnownFields(automation.stagehand, automation.context);
+
+  let missingFields = await findMissingFields(automation.stagehand);
+  if (missingFields.length > 0) {
+    const field = missingFields[0];
+    automation.pendingField = field;
+    const isRepeat = automation.lastRequestedKey === field.key;
+    automation.lastRequestedKey = field.key;
+    const promptMessage = await channel.send(`🤖 I need a bit more info to continue: ${field.question}`);
+    pendingAutomationInputs.set(automation.userId, {
+      decisionId: automation.decisionId,
+      field,
+      channelId: channel.id,
+      promptMessageId: promptMessage.id,
+    });
+    await updateAutomationState(automation.decisionId, automation.emailId, {
+      status: 'waiting_user',
+      pending_field: field,
+    });
+    if (isRepeat) {
+      await channel.send('ℹ️ I still see that field as empty. Please double‑check the value or try a simpler version (e.g., first name only).');
+    }
+    return { status: 'needs_input' };
+  }
+
+  await attemptSubmit(automation.stagehand);
+
+  missingFields = await findMissingFields(automation.stagehand);
+  if (missingFields.length > 0) {
+    const field = missingFields[0];
+    automation.pendingField = field;
+    const isRepeat = automation.lastRequestedKey === field.key;
+    automation.lastRequestedKey = field.key;
+    const promptMessage = await channel.send(`🤖 I still need: ${field.question}`);
+    pendingAutomationInputs.set(automation.userId, {
+      decisionId: automation.decisionId,
+      field,
+      channelId: channel.id,
+      promptMessageId: promptMessage.id,
+    });
+    await updateAutomationState(automation.decisionId, automation.emailId, {
+      status: 'waiting_user',
+      pending_field: field,
+    });
+    if (isRepeat) {
+      await channel.send('ℹ️ That field is still empty. Please provide a different value or format (e.g., first name only).');
+    }
+    return { status: 'needs_input' };
+  }
+
+  const summary = await summarizeCompletion(automation.stagehand);
+  let screenshot = null;
+  try {
+    screenshot = await automation.page.screenshot({ type: 'png' });
+  } catch (error) {
+    console.warn('Screenshot failed:', error.message);
+  }
+
+  await updateAutomationState(automation.decisionId, automation.emailId, {
+    status: 'completed',
+    summary: summary?.summary || 'Automation completed.',
+  });
+
+  return { status: 'completed', summary, screenshot };
+}
+
+async function startAutomationForDecision(decisionId, pending, channel, userId) {
+  if (activeAutomations.has(decisionId)) {
+    await channel.send('⏳ Automation already running for this email.');
+    return;
+  }
+  if (!pending || !pending.email) {
+    try {
+      const decisionDoc = await db.collection('agent_decisions').doc(decisionId).get();
+      if (decisionDoc.exists) {
+        const decision = decisionDoc.data();
+        if (decision?.email_id) {
+          const emailDoc = await db.collection('emails').doc(decision.email_id).get();
+          if (emailDoc.exists) {
+            pending = { decision, email: { id: emailDoc.id, ...emailDoc.data() } };
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Automation fetch error:', error);
+    }
+  }
+
+  if (!pending || !pending.email) {
+    await channel.send('❌ Could not find the email for automation.');
+    return;
+  }
+
+  const email = pending.email;
+  const url = await extractActionLink(email);
+  if (!url) {
+    await channel.send('❌ I could not find a usable link in that email.');
+    return;
+  }
+
+  await channel.send(`🤖 Starting automation for: ${email.subject || 'Email'}\n🔗 ${url}`);
+
+  let automationSession;
+  try {
+    automationSession = await initAutomationSession({});
+  } catch (error) {
+    console.error('Automation init error:', error);
+    await updateAutomationState(decisionId, email.id, { status: 'error', error: error.message });
+    await channel.send(`❌ Automation failed to start: ${error.message}`);
+    return;
+  }
+
+  const automation = {
+    decisionId,
+    emailId: email.id,
+    userId,
+    url,
+    context: {},
+    ...automationSession,
+  };
+
+  activeAutomations.set(decisionId, automation);
+
+  await updateAutomationState(decisionId, email.id, {
+    status: 'running',
+    session_id: automation.sessionId,
+    session_url: automation.sessionUrl,
+    debug_url: automation.debugUrl,
+    context: automation.context,
+  });
+
+  try {
+    await automation.page.goto(url, { waitUntil: 'domcontentloaded' });
+    const result = await advanceAutomation(automation, channel);
+
+    if (result.status === 'completed') {
+      const files = [];
+      if (result.screenshot) {
+        files.push(new AttachmentBuilder(result.screenshot, { name: 'automation.png' }));
+      }
+      await channel.send({
+        content: `✅ Automation complete.\n${result.summary?.summary || 'Done.'}`,
+        files,
+      });
+      if (automation.stagehand?.close) {
+        await automation.stagehand.close();
+      }
+      activeAutomations.delete(decisionId);
+    }
+  } catch (error) {
+    console.error('Automation error:', error);
+    await updateAutomationState(decisionId, email.id, { status: 'error', error: error.message });
+    await channel.send(`❌ Automation failed: ${error.message}`);
+    if (automationSession.stagehand?.close) {
+      await automationSession.stagehand.close();
+    }
+  }
+}
+
+async function handleAutomationUserInput(message, pendingInput) {
+  const { decisionId, field } = pendingInput;
+  const automation = activeAutomations.get(decisionId);
+
+  if (!automation) {
+    pendingAutomationInputs.delete(message.author.id);
+    await message.reply('❌ Automation session expired. Please click "Do it for me" again.');
+    return;
+  }
+
+  const userValue = message.content.trim();
+  if (!userValue) {
+    await message.reply('Please provide a value so I can continue.');
+    return;
+  }
+
+  if (/^(cancel|stop|abort)$/i.test(userValue)) {
+    pendingAutomationInputs.delete(message.author.id);
+    if (automation.stagehand?.close) {
+      await automation.stagehand.close();
+    }
+    activeAutomations.delete(decisionId);
+    await updateAutomationState(decisionId, automation.emailId, { status: 'cancelled' });
+    await message.reply('🛑 Automation cancelled.');
+    return;
+  }
+
+  await message.reply(`✅ Got it. Filling "${field.label || field.placeholder || field.name || field.key}" and continuing...`);
+  const fieldKey = field.key || 'unknown';
+  const nextContext = { [fieldKey]: userValue };
+  const normalizedLabel = `${field.label || field.placeholder || field.name || fieldKey}`.toLowerCase();
+  if (normalizedLabel.includes('name')) {
+    const parts = userValue.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      nextContext.full_name = userValue;
+      nextContext.first_name = parts[0];
+      nextContext.last_name = parts.slice(1).join(' ');
+    } else {
+      nextContext.full_name = userValue;
+    }
+  }
+  Object.assign(automation.context, nextContext);
+
+  try {
+    await fillKnownFields(automation.stagehand, nextContext);
+    await automation.stagehand.act('ensure the field you just filled is no longer empty');
+    try {
+      await automation.stagehand.act('click the next, continue, or submit button if it is available');
+      await automation.stagehand.act('wait for any page updates after clicking next or continue');
+    } catch (error) {
+      // Fallback: nudge focus forward to the next field
+      try {
+        await automation.page.keyboard.press('Tab');
+      } catch (keyboardError) {
+        // Ignore if keyboard press fails
+      }
+    }
+    pendingAutomationInputs.delete(message.author.id);
+    await updateAutomationState(decisionId, automation.emailId, {
+      status: 'running',
+      pending_field: null,
+      context: automation.context,
+    });
+    await message.channel.send('🤖 Continuing automation...');
+    const result = await advanceAutomation(automation, message.channel);
+    if (result.status === 'completed') {
+      const files = [];
+      if (result.screenshot) {
+        files.push(new AttachmentBuilder(result.screenshot, { name: 'automation.png' }));
+      }
+      await message.channel.send({
+        content: `✅ Automation complete.\n${result.summary?.summary || 'Done.'}`,
+        files,
+      });
+      if (automation.stagehand?.close) {
+        await automation.stagehand.close();
+      }
+      activeAutomations.delete(decisionId);
+    }
+  } catch (error) {
+    console.error('Automation resume error:', error);
+    await updateAutomationState(decisionId, automation.emailId, { status: 'error', error: error.message });
+    await message.reply(`❌ Automation failed: ${error.message}`);
+  }
 }
 
 // ============================================================
@@ -1019,6 +1423,26 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // ---- AUTOMATE ----
+    else if (interaction.customId.startsWith('automate_')) {
+      try {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.deferReply({ ephemeral: true });
+        }
+      } catch (error) {
+        if (error?.code === 10062 || error?.code === 40060) return;
+        throw error;
+      }
+
+      if (!pending || !pending.email) {
+        await interaction.editReply('❌ Could not find the email. It may have expired.');
+        return;
+      }
+
+      await interaction.editReply('🤖 Starting automation. I will ask for any missing info.');
+      await startAutomationForDecision(decisionId, pending, interaction.channel, interaction.user.id);
+    }
+
     // ---- SEND EMAIL ----
     else if (interaction.customId.startsWith('send_')) {
       const draftId = interaction.customId.replace('send_', '');
@@ -1067,6 +1491,10 @@ client.on('interactionCreate', async (interaction) => {
           .setLabel('Reply')
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
+          .setCustomId(`setaction_automate_${decisionId}`)
+          .setLabel('Automate')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
           .setCustomId(`setaction_star_${decisionId}`)
           .setLabel('Star')
           .setStyle(ButtonStyle.Secondary),
@@ -1102,8 +1530,15 @@ client.on('interactionCreate', async (interaction) => {
 
   } catch (error) {
     console.error('Button interaction error:', error);
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: '❌ Something went wrong. Please try again.', ephemeral: true });
+    if (error?.code === 10062 || error?.code === 40060) return;
+    if (!interaction.replied && !interaction.deferred && interaction.isRepliable?.()) {
+      try {
+        await interaction.reply({ content: '❌ Something went wrong. Please try again.', ephemeral: true });
+      } catch (replyError) {
+        if (replyError?.code !== 10062 && replyError?.code !== 40060) {
+          console.error('Failed to send interaction error reply:', replyError);
+        }
+      }
     }
   }
 });
@@ -1234,7 +1669,6 @@ function addToHistory(userId, role, content) {
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
-  if (message.channel.id !== process.env.DISCORD_CHANNEL_ID) return;
 
   // Prevent duplicate processing of the same message
   if (processedMessages.has(message.id)) return;
@@ -1249,6 +1683,23 @@ client.on('messageCreate', async (message) => {
 
   const userId = message.author.id;
   const userMessage = message.content;
+
+  const pendingInput = pendingAutomationInputs.get(userId);
+  if (pendingInput) {
+    const isSameChannel = message.channel.id === pendingInput.channelId;
+    const isReplyToPrompt = message.reference?.messageId === pendingInput.promptMessageId;
+    const isThreadReply =
+      typeof message.channel.isThread === 'function' &&
+      message.channel.isThread() &&
+      message.channel.parentId === pendingInput.channelId;
+
+    if (isSameChannel || isReplyToPrompt || isThreadReply) {
+      await handleAutomationUserInput(message, pendingInput);
+      return;
+    }
+  }
+
+  if (message.channel.id !== process.env.DISCORD_CHANNEL_ID) return;
   
   // Show typing
   await message.channel.sendTyping();
@@ -1383,10 +1834,10 @@ client.once('ready', async () => {
     console.log('🔍 Checking for existing important emails...');
     await checkForUnprocessedEmails();
     
-    // Start continuous Gmail scraping (every 5 SECONDS for testing)
-    console.log('📥 Starting Gmail scraper (every 5 seconds)...');
+    // Start continuous Gmail scraping (rate-limited)
+    console.log(`📥 Starting Gmail scraper (every ${Math.round(SCRAPE_INTERVAL / 1000)} seconds)...`);
     await scrapeNewEmails(); // Initial scrape
-    setInterval(scrapeNewEmails, 5000); // Every 5 seconds for testing
+    setInterval(scrapeNewEmails, 5000); // Internal function enforces SCRAPE_INTERVAL/backoff
     
     // Periodically check for unprocessed emails (every 2 minutes)
     setInterval(async () => {

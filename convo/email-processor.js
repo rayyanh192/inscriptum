@@ -35,7 +35,9 @@ async function processEmails() {
   console.log('🚀 Starting email processing...');
 
   // Fetch emails
-  const emails = await fetchEmails(10); // Adjust number as needed
+  const emails = await fetchEmails(10, {
+    includeThreadCheck: false,
+  }); // Adjust number as needed
 
   console.log(`📊 Processing ${emails.length} emails...`);
 

@@ -103,6 +103,7 @@ async def decide_action(
     - 'delete': Delete (spam, unwanted)
     - 'ask': Ask user for guidance
     - 'notify': Just notify user
+    - 'automate': Perform a browser-based action for actionable links
     
     Args:
         email_data: Original email data
@@ -175,6 +176,7 @@ Available Actions:
 - 'delete': Delete (spam, unwanted marketing, etc.)
 - 'ask': Ask user what to do (uncertain or risky)
 - 'notify': Just inform user (FYI only)
+- 'automate': Use browser automation for actionable links (check-in, payment, signup)
 
 Decision Guidelines:
 - High importance + requires response → 'respond'
@@ -185,7 +187,7 @@ Decision Guidelines:
 
 You must respond ONLY with valid JSON:
 {{
-  "action": "respond|archive|star|delete|ask|notify",
+  "action": "respond|archive|star|delete|ask|notify|automate",
   "reason": "why this action is appropriate",
   "confidence": 0.85,
   "risk_level": "low|medium|high",
