@@ -1,0 +1,3 @@
+[36m[1mweave[0m: Logged in as Weights & Biases user: inscriptum85.
+[36m[1mweave[0m: View Weave data at https://wandb.ai/inscriptum85-inscriptum/email-agent/weave
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c193f-98e9-7186-a56f-e43f33f211a3

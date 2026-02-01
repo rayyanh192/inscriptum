@@ -58,8 +58,9 @@ let botReady = false;
 let notificationChannel = null;
 let lastCheckedTimestamp = Date.now();
 
-// Track pending decisions awaiting user feedback
+// Track pending decisions awaiting user feedback (with expiry)
 const pendingDecisions = new Map();
+const DECISION_EXPIRY_MS = 5 * 60 * 1000; // Keep decisions for 5 minutes
 // Track draft responses awaiting user approval
 const pendingDrafts = new Map();
 // Conversation history per user (keeps context)
@@ -80,7 +81,26 @@ const MAX_HISTORY_LENGTH = 20; // Keep last 20 messages per user
  * Stores the decision in Firebase for the agent to process
  */
 async function processEmailWithAgent(email) {
-  // Get learned rules to make decision
+  // Try to use Python agent server first
+  try {
+    const response = await fetch('http://localhost:5001/process-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(email)
+    });
+    
+    if (response.ok) {
+      const result = await response.json();
+      if (result.status === 'success') {
+        console.log('  🐍 Using Python agent');
+        return result.decision;
+      }
+    }
+  } catch (error) {
+    console.log('  ⚠️ Python agent unavailable, falling back to local logic');
+  }
+  
+  // Fallback: Use local learned rules + LLM
   const rules = [];
   const rulesSnapshot = await db.collection('learned_rules')
     .where('status', '==', 'active')
@@ -128,6 +148,8 @@ function ruleMatches(rule, email) {
   const conditions = rule.conditions || {};
   const from = (email.from || '').toLowerCase();
   const subject = (email.subject || '').toLowerCase();
+  const body = (email.body || '').toLowerCase();
+  const combinedText = `${subject} ${body}`.slice(0, 200);
   
   for (const [key, value] of Object.entries(conditions)) {
     if (key === 'sender_contains') {
@@ -137,6 +159,16 @@ function ruleMatches(rule, email) {
       if (domain !== value) return false;
     } else if (key === 'subject_contains') {
       if (!subject.includes((value || '').toLowerCase())) return false;
+    } else if (key === 'content_pattern') {
+      // Special pattern matching for casual greetings
+      if (value === 'casual_greeting') {
+        const casualPatterns = ['what up', 'whats up', 'wassup', 'sup', 'hey', 'hi ', 'hello', 'yo ', 'hiii'];
+        const hasCasualPattern = casualPatterns.some(p => combinedText.includes(p));
+        if (!hasCasualPattern) return false;
+      }
+    } else if (key === 'max_length') {
+      // Check combined text length
+      if (combinedText.length > value) return false;
     }
   }
   
@@ -219,16 +251,37 @@ async function recordFeedback(decisionId, feedbackType, correctAction = null) {
       const email = decision.email;
       const ruleId = `rule_discord_${Date.now()}`;
       
-      // Extract sender identifier
+      // Extract patterns from email
       const senderPart = email.from.split('@')[0].toLowerCase();
+      const subject = (email.subject || '').toLowerCase();
+      const body = (email.body || '').toLowerCase();
+      const combinedText = `${subject} ${body}`.slice(0, 200);
+      
+      // Detect casual/short messages (high priority patterns)
+      const casualPatterns = ['what up', 'whats up', 'wassup', 'sup', 'hey', 'hi ', 'hello', 'yo ', 'hiii'];
+      const isCasualGreeting = casualPatterns.some(p => combinedText.includes(p)) && combinedText.length < 100;
+      
+      // Build conditions based on message characteristics
+      const conditions = { sender_contains: senderPart };
+      let pattern = `Emails from ${email.from.slice(0, 30)}...`;
+      
+      // If it's a casual greeting that should be ignored, make it very specific
+      if (isCasualGreeting && correctAction === 'ignore') {
+        conditions.content_pattern = 'casual_greeting';
+        conditions.max_length = 100;
+        pattern = `Casual short messages (${combinedText.slice(0, 30)}...) from ${email.from.slice(0, 20)}... → ${correctAction}`;
+        console.log(`  📝 Creating SPECIFIC rule for casual messages`);
+      } else if (subject.length > 5) {
+        // Use subject pattern for more specific matching
+        conditions.subject_contains = subject.slice(0, 30);
+        pattern = `"${subject.slice(0, 30)}..." from ${email.from.slice(0, 20)}... → ${correctAction}`;
+      }
       
       await db.collection('learned_rules').doc(ruleId).set({
         id: ruleId,
-        pattern: `Emails from ${email.from.slice(0, 30)}... should be ${correctAction}`,
+        pattern: pattern,
         description: `Learned from Discord feedback`,
-        conditions: {
-          sender_contains: senderPart
-        },
+        conditions: conditions,
         action: correctAction,
         confidence: 0.95,
         created_from: 'discord_feedback',
@@ -237,11 +290,12 @@ async function recordFeedback(decisionId, feedbackType, correctAction = null) {
         status: 'active'
       });
 
-      console.log(`📚 Created learned rule: ${ruleId}`);
+      console.log(`📚 Created learned rule: ${ruleId} → ${correctAction}`);
     }
   }
 
-  pendingDecisions.delete(decisionId);
+  // Don't delete immediately - let it expire naturally after 5 minutes
+  // pendingDecisions.delete(decisionId);
 }
 
 // ============================================================
@@ -250,6 +304,29 @@ async function recordFeedback(decisionId, feedbackType, correctAction = null) {
 
 let lastScrapeTime = 0;
 const SCRAPE_INTERVAL = 5000; // Scrape every 5 seconds (for testing)
+
+/**
+ * Clean up expired decisions from memory
+ * Runs periodically to prevent memory leaks
+ */
+function cleanupExpiredDecisions() {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  for (const [id, data] of pendingDecisions.entries()) {
+    if (data.expiresAt && data.expiresAt < now) {
+      pendingDecisions.delete(id);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`🧹 Cleaned up ${cleaned} expired decision(s)`);
+  }
+}
+
+// Run cleanup every minute
+setInterval(cleanupExpiredDecisions, 60000);
 
 /**
  * Scrape new emails from Gmail and add to Firebase
@@ -617,10 +694,14 @@ async function checkAndNotifyEmail(emailId) {
     
     // PRIORITY NOTIFICATION LOGIC
     const isUrgent = decision.is_urgent || decision.is_time_sensitive;
-    const isImportant = decision.action === 'reply' || decision.action === 'star';
     const isHighConfidence = decision.confidence && decision.confidence > 0.7;
     
-    const shouldNotify = isUrgent || isImportant || isHighConfidence;
+    // For reply/star actions: only notify if high confidence OR urgent
+    // This prevents "pay me next month no rush" (low conf, not urgent) from notifying
+    const isImportant = (decision.action === 'reply' || decision.action === 'star') && 
+                        (isHighConfidence || isUrgent);
+    
+    const shouldNotify = isUrgent || isImportant;
     
     if (!shouldNotify) {
       await docRef.update({ discord_notified: true });
@@ -755,8 +836,12 @@ async function notifyUserAboutEmail(decisionId, decision) {
     ? `To: ${email.to || 'Unknown'}` 
     : `From: ${email.from || 'Unknown'}`;
 
-  // Store for feedback tracking
-  pendingDecisions.set(decisionId, { decision, email });
+  // Store for feedback tracking with expiry timestamp
+  pendingDecisions.set(decisionId, { 
+    decision, 
+    email,
+    expiresAt: Date.now() + DECISION_EXPIRY_MS
+  });
 
   // Color based on urgency and action
   let embedColor;
@@ -844,6 +929,29 @@ async function notifyUserAboutEmail(decisionId, decision) {
 
 async function generateDraftResponse(email, userMessage) {
   try {
+    // Try Python agent first
+    try {
+      const response = await fetch('http://localhost:5001/generate-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email,
+          user_message: userMessage
+        })
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        if (result.status === 'success') {
+          console.log('  🐍 Using Python agent for draft');
+          return result.draft;
+        }
+      }
+    } catch (agentError) {
+      console.log('  ⚠️ Python agent unavailable for drafting, using fallback');
+    }
+    
+    // Fallback: Use Groq directly with sender style matching
     // Get SENDER's previous emails to learn THEIR style (how they write to you)
     const senderEmail = email.from;
     const timeoutPromise = new Promise((_, reject) => 
@@ -967,8 +1075,14 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ embeds: [embed], components: [row] });
       } catch (error) {
         console.error('Modal submission error:', error);
-        if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({ content: '❌ Something went wrong. Please try again.', ephemeral: true });
+        try {
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({ content: '❌ Something went wrong. Please try again.', ephemeral: true });
+          } else {
+            await interaction.editReply({ content: '❌ Something went wrong. Please try again.', embeds: [], components: [] });
+          }
+        } catch (replyError) {
+          console.error('Failed to send error message:', replyError);
         }
       }
     }
@@ -977,10 +1091,25 @@ client.on('interactionCreate', async (interaction) => {
 
   if (!interaction.isButton()) return;
 
-  const [action, decisionId] = interaction.customId.split('_').reduce((acc, part, i, arr) => {
-    if (i === 0) return [part, ''];
-    return [acc[0], acc[1] + (acc[1] ? '_' : '') + part];
-  }, ['', '']);
+  // Extract action and decisionId from button customId
+  // Format can be: action_decisionId OR action_subaction_decisionId
+  const customId = interaction.customId;
+  let action, decisionId;
+  
+  // Handle multi-part actions (like should_reply, setaction_reply)
+  if (customId.startsWith('should_reply_')) {
+    action = 'should_reply';
+    decisionId = customId.replace('should_reply_', '');
+  } else if (customId.startsWith('setaction_')) {
+    const parts = customId.split('_');
+    action = `${parts[0]}_${parts[1]}`; // setaction_reply, setaction_star, etc
+    decisionId = parts.slice(2).join('_');
+  } else {
+    // Simple format: action_decisionId
+    const firstUnderscore = customId.indexOf('_');
+    action = customId.substring(0, firstUnderscore);
+    decisionId = customId.substring(firstUnderscore + 1);
+  }
 
   const pending = pendingDecisions.get(decisionId);
 
@@ -1051,12 +1180,37 @@ client.on('interactionCreate', async (interaction) => {
 
     // ---- SHOULD REPLY ----
     else if (interaction.customId.startsWith('should_reply_')) {
-      console.log(`📝 Should reply feedback: ${decisionId}`);
+      console.log(`📝 Should reply clicked for: ${decisionId}`);
+      console.log(`  Checking pendingDecisions cache...`);
+      console.log(`  Cache has ${pendingDecisions.size} decisions`);
+      console.log(`  Decision exists: ${pendingDecisions.has(decisionId)}`);
+      
+      if (!pending || !pending.email) {
+        console.log(`  ❌ ERROR: pending=${!!pending}, email=${pending?.email ? 'exists' : 'missing'}`);
+        await interaction.reply({ content: '❌ Could not find the email. It may have expired.', ephemeral: true });
+        return;
+      }
+      
+      console.log(`  ✅ Found email, showing modal`);
       await recordFeedback(decisionId, 'action_wrong', 'reply');
-      await interaction.reply({ 
-        content: '📝 Got it! I\'ll suggest replying to similar emails in the future.\nWould you like me to draft a response?',
-        ephemeral: true 
-      });
+
+      // Show modal to ask what user wants to say
+      const modal = new ModalBuilder()
+        .setCustomId(`draftmodal_${decisionId}`)
+        .setTitle('What do you want to say?');
+
+      const responseInput = new TextInputBuilder()
+        .setCustomId('responseText')
+        .setLabel('Your message')
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('e.g., "yeah I\'m coming, see you at 7"')
+        .setRequired(true)
+        .setMaxLength(1000);
+
+      const actionRow = new ActionRowBuilder().addComponents(responseInput);
+      modal.addComponents(actionRow);
+
+      await interaction.showModal(modal);
     }
 
     // ---- CORRECT/CHANGE ACTION ----
@@ -1232,6 +1386,107 @@ function addToHistory(userId, role, content) {
   }
 }
 
+// ============================================================
+// METRICS COMMANDS - Query agent learning stats
+// ============================================================
+
+async function getAgentMetrics() {
+  try {
+    const response = await fetch('http://localhost:5002/api/metrics');
+    if (response.ok) {
+      return await response.json();
+    }
+  } catch (error) {
+    console.log('Metrics dashboard unavailable');
+  }
+  return null;
+}
+
+async function formatMetricsEmbed(metrics) {
+  if (!metrics) {
+    return new EmbedBuilder()
+      .setColor(0xff6b6b)
+      .setTitle('📊 Metrics Dashboard Offline')
+      .setDescription('Start the metrics dashboard with:\n```python agent/metrics_dashboard.py```')
+      .setTimestamp();
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x667eea)
+    .setTitle('🧠 Agent Learning Metrics')
+    .setDescription('Real-time self-learning statistics')
+    .setTimestamp();
+
+  // Learning proof
+  if (metrics.learning_proof) {
+    let learningText = '';
+    if (metrics.learning_proof.confidence_improvement !== undefined) {
+      const improvement = (metrics.learning_proof.confidence_improvement * 100).toFixed(1);
+      const emoji = metrics.learning_proof.is_learning ? '📈' : '📊';
+      learningText += `${emoji} Confidence: ${improvement > 0 ? '+' : ''}${improvement}%\n`;
+    }
+    if (metrics.learning_proof.total_feedback !== undefined) {
+      learningText += `💬 Total Feedback: ${metrics.learning_proof.total_feedback}\n`;
+    }
+    if (learningText) {
+      embed.addFields({ name: '🧠 Learning Proof', value: learningText, inline: false });
+    }
+  }
+
+  // Decisions
+  if (metrics.decisions && metrics.decisions.total_decisions) {
+    let decisionsText = `📊 Total: ${metrics.decisions.total_decisions}\n`;
+    if (metrics.decisions.recent_confidence) {
+      const conf = (metrics.decisions.recent_confidence.avg * 100).toFixed(1);
+      decisionsText += `⚡ Recent Confidence: ${conf}%\n`;
+    }
+    if (metrics.decisions.older_confidence) {
+      const conf = (metrics.decisions.older_confidence.avg * 100).toFixed(1);
+      decisionsText += `📉 Older Confidence: ${conf}%\n`;
+    }
+    embed.addFields({ name: '⚡ Decisions', value: decisionsText, inline: true });
+  }
+
+  // People graph
+  if (metrics.people_graph && metrics.people_graph.total_people) {
+    let peopleText = `👥 Total: ${metrics.people_graph.total_people}\n`;
+    if (metrics.people_graph.importance_dist) {
+      const dist = metrics.people_graph.importance_dist;
+      peopleText += `🔴 High: ${dist.high || 0} | 🟡 Med: ${dist.medium || 0} | ⚪ Low: ${dist.low || 0}`;
+    }
+    embed.addFields({ name: '👥 People Graph', value: peopleText, inline: true });
+  }
+
+  // Patterns
+  if (metrics.patterns && metrics.patterns.total_rules !== undefined) {
+    let patternsText = `📚 Total Rules: ${metrics.patterns.total_rules}\n`;
+    if (metrics.patterns.recent_rules && metrics.patterns.recent_rules.length > 0) {
+      patternsText += '\n**Recent:**\n';
+      metrics.patterns.recent_rules.slice(0, 3).forEach((rule, i) => {
+        const conf = (rule.confidence * 100).toFixed(0);
+        patternsText += `${i + 1}. ${rule.description} (${conf}%)\n`;
+      });
+    }
+    embed.addFields({ name: '📊 Learned Patterns', value: patternsText, inline: false });
+  }
+
+  // Exploration
+  if (metrics.exploration && metrics.exploration.total_hypotheses) {
+    let exploreText = `🔬 Hypotheses: ${metrics.exploration.total_hypotheses}\n`;
+    exploreText += `✅ Validated: ${metrics.exploration.validated || 0}\n`;
+    exploreText += `❌ Rejected: ${metrics.exploration.rejected || 0}\n`;
+    if (metrics.exploration.success_rate !== undefined) {
+      const rate = (metrics.exploration.success_rate * 100).toFixed(1);
+      exploreText += `📈 Success Rate: ${rate}%`;
+    }
+    embed.addFields({ name: '🔬 Exploration', value: exploreText, inline: true });
+  }
+
+  embed.setFooter({ text: 'View full dashboard: http://localhost:5002/dashboard' });
+
+  return embed;
+}
+
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channel.id !== process.env.DISCORD_CHANNEL_ID) return;
@@ -1257,6 +1512,18 @@ client.on('messageCreate', async (message) => {
   addToHistory(userId, 'user', userMessage);
 
   try {
+    // SPECIAL COMMAND: Show metrics
+    if (userMessage.toLowerCase().includes('show metrics') || 
+        userMessage.toLowerCase().includes('show stats') || 
+        userMessage.toLowerCase().includes('agent metrics') ||
+        userMessage.toLowerCase() === 'metrics') {
+      console.log('📊 Fetching agent metrics...');
+      const metrics = await getAgentMetrics();
+      const embed = await formatMetricsEmbed(metrics);
+      await message.reply({ embeds: [embed] });
+      return;
+    }
+    
     // Check if user is asking about emails
     const emailKeywords = ['email', 'emails', 'inbox', 'message', 'externship', 'internship', 'job', 'interview', 'meeting', 'appointment', 'from', 'sent', 'received', 'canvas', 'professor', 'class', 'abraham', 'abe'];
     const isAskingAboutEmails = emailKeywords.some(kw => userMessage.toLowerCase().includes(kw));

@@ -102,6 +102,9 @@ async def predict_importance(email: Dict, person_context: Optional[Dict], db) ->
         "signal_scores": scores,
         "reasoning": reasoning,
         "content_analysis": content_analysis,
+        "is_urgent": content_analysis.get('urgency_score', 0) > 0.7,
+        "is_time_sensitive": content_analysis.get('is_time_sensitive', False),
+        "deadline_mentioned": content_analysis.get('deadline_mentioned', False),
         "timestamp": datetime.utcnow().isoformat()
     }
 
@@ -168,6 +171,11 @@ async def analyze_content_urgency(email: Dict) -> Dict[str, Any]:
     prompt = f"""Analyze this email for urgency and action items:
 
 {content}
+
+CRITICAL RULES:
+- If email says "no rush", "whenever", "no hurry", "take your time" → NOT time-sensitive
+- If deadline is >3 days away ("next week", "next month") → NOT time-sensitive
+- ONLY time-sensitive if: "tonight", "today", "ASAP", "urgent", "immediately", deadline within 48 hours
 
 Respond in JSON with:
 {{

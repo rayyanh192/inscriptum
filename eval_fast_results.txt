@@ -1,0 +1,54 @@
+[36m[1mweave[0m: Logged in as Weights & Biases user: inscriptum85.
+[36m[1mweave[0m: View Weave data at https://wandb.ai/inscriptum85-inscriptum/email-agent/weave
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-54e5-7f68-a22b-83665a9225f5
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-568c-702b-af1d-c25bb282577e
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-5e5e-78bc-9605-7c61e8650975
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-5f26-7307-b2e1-55d1e74fd87c
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-66f9-79e1-9531-89f6cb5cd2e7
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-684a-7b7c-8369-7634c3e13d7d
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-701c-7c61-a7bf-cf7a61d51cce
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-70f6-7e13-90c9-b39eb5f8c5a2
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-78c8-7f43-8430-6d4d6e6ebc3f
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1943-7984-70c5-b0f1-05f52d033dd9
+======================================================================
+🚀 FAST EVALUATION (No Historical Context)
+======================================================================
+
+⏳ Processing 1/5: Urgent: Need report by 5pm...
+   ✅ Expected: respond, Got: respond
+   Confidence: 100%
+
+⏳ Processing 2/5: Weekly Newsletter - Feb 2025...
+   ✅ Expected: archive, Got: archive
+   Confidence: 80%
+
+⏳ Processing 3/5: Re: Project deadline concerns...
+   ✅ Expected: respond, Got: respond
+   Confidence: 90%
+
+⏳ Processing 4/5: CONGRATULATIONS! You won $1000...
+   ✅ Expected: delete, Got: delete
+   Confidence: 95%
+
+⏳ Processing 5/5: FYI: Office closed tomorrow...
+   ❌ Expected: notify, Got: archive
+   Confidence: 80%
+
+======================================================================
+📊 RESULTS
+======================================================================
+Accuracy: 80% (4/5 correct)
+
+Details:
+  ✅ Urgent: Need report by 5pm
+     Expected: respond, Got: respond (100%)
+  ✅ Weekly Newsletter - Feb 2025
+     Expected: archive, Got: archive (80%)
+  ✅ Re: Project deadline concerns
+     Expected: respond, Got: respond (90%)
+  ✅ CONGRATULATIONS! You won $1000
+     Expected: delete, Got: delete (95%)
+  ❌ FYI: Office closed tomorrow
+     Expected: notify, Got: archive (80%)
+
+💡 This is your BASELINE. After training for a week, re-run to measure improvement!
