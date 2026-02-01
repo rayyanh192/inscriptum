@@ -40,25 +40,33 @@ async def analyze_communication_style(db) -> Dict[str, Any]:
     print("✍️ ANALYZING COMMUNICATION STYLE")
     print("="*60)
     
-    # Fetch emails where user replied (these show user's writing)
-    replied_emails = []
-    docs = db.collection('emails').where('has_reply', '==', True).stream()
+    # Fetch emails where user sent (these show user's writing)
+    sent_emails = []
     
+    # Get emails marked as sent
+    docs = db.collection('emails').where('is_sent', '==', True).stream()
     for doc in docs:
         data = doc.to_dict()
-        replied_emails.append(data)
+        sent_emails.append(data)
     
-    print(f"📝 Found {len(replied_emails)} emails with user replies")
+    # Also get emails where user replied in thread
+    replied_docs = db.collection('emails').where('has_reply', '==', True).stream()
+    for doc in replied_docs:
+        data = doc.to_dict()
+        if not data.get('is_sent'):  # Avoid duplicates
+            sent_emails.append(data)
     
-    if not replied_emails:
+    print(f"📝 Found {len(sent_emails)} emails showing your writing style")
+    
+    if not sent_emails:
         return {
             "status": "insufficient_data",
-            "message": "No replied emails found to analyze style",
+            "message": "No sent emails found to analyze style",
             "style_profile": get_default_style_profile()
         }
     
     # Analyze patterns
-    style_profile = await extract_style_patterns(replied_emails)
+    style_profile = await extract_style_patterns(sent_emails)
     
     # Store in Firebase
     style_profile["created_at"] = datetime.utcnow().isoformat()
@@ -70,7 +78,7 @@ async def analyze_communication_style(db) -> Dict[str, Any]:
     
     return {
         "status": "success",
-        "emails_analyzed": len(replied_emails),
+        "emails_analyzed": len(sent_emails),
         "style_profile": style_profile
     }
 
@@ -139,7 +147,7 @@ Respond with ONLY the JSON."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You analyze writing styles. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}
@@ -321,7 +329,7 @@ Keep the same meaning but adjust the style. Respond with ONLY the rewritten text
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.4,
             max_tokens=1000

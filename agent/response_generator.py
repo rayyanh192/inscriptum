@@ -158,7 +158,7 @@ Respond with ONLY the JSON."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You are an email assistant that writes responses matching the user's style. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}
@@ -227,7 +227,7 @@ Respond with ONLY the JSON."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "Generate quick email replies. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}
@@ -300,7 +300,7 @@ Respond with ONLY the JSON."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You improve email drafts. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}

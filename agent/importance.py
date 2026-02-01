@@ -183,7 +183,7 @@ Respond with ONLY the JSON."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You analyze email urgency. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}

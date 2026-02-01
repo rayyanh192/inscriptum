@@ -84,10 +84,14 @@ async def process_feedback_for_learning(feedback: Dict, db) -> None:
     """
     Process feedback to improve the agent's models.
     
+    CRITICAL: This validates exploration hypotheses.
+    When user gives feedback on an exploration, we know if it worked.
+    
     Updates:
     - Person profiles (action history)
     - Importance patterns
     - Style profiles
+    - EXPLORATION HYPOTHESES (validate/reject)
     """
     feedback_type = feedback.get('feedback_type')
     feedback_data = feedback.get('feedback_data', {})
@@ -101,6 +105,16 @@ async def process_feedback_for_learning(feedback: Dict, db) -> None:
     decision = decision_doc.to_dict()
     email_id = decision.get('email_id')
     sender = decision.get('sender')
+    
+    # CRITICAL: Check if this was an exploration
+    exploration_metadata = decision.get('exploration_metadata')
+    if exploration_metadata and exploration_metadata.get('is_exploration'):
+        await validate_exploration_hypothesis(
+            exploration_metadata, 
+            feedback_type, 
+            feedback_data, 
+            db
+        )
     
     # Update based on feedback type
     if feedback_type == 'action_wrong':
@@ -121,6 +135,57 @@ async def process_feedback_for_learning(feedback: Dict, db) -> None:
         if email_id:
             from .style_learning import learn_style_from_feedback
             await learn_style_from_feedback(email_id, feedback_data.get('changes', ''), db)
+
+
+@weave.op()
+async def validate_exploration_hypothesis(
+    exploration_metadata: Dict,
+    feedback_type: str,
+    feedback_data: Dict,
+    db
+):
+    """
+    Validate whether an exploration hypothesis worked.
+    
+    THIS IS WHERE AGENT LEARNS FROM ITS EXPERIMENTS.
+    
+    If exploration worked: Mark hypothesis as validated
+    If exploration failed: Mark hypothesis as rejected
+    """
+    
+    hypothesis_id = exploration_metadata.get('hypothesis_id')
+    if not hypothesis_id:
+        return
+    
+    # Determine if exploration was successful
+    is_successful = (
+        feedback_type == 'action_correct' or
+        (feedback_type == 'action_wrong' and 
+         feedback_data.get('correct_action') == exploration_metadata.get('base_decision', {}).get('action'))
+    )
+    
+    # Update hypothesis in Firebase
+    hypothesis_ref = db.collection('exploration_hypotheses').document(hypothesis_id)
+    hypothesis_doc = hypothesis_ref.get()
+    
+    if hypothesis_doc.exists:
+        hypothesis_ref.update({
+            'validation_result': 'validated' if is_successful else 'rejected',
+            'validated_at': datetime.utcnow().isoformat(),
+            'feedback_type': feedback_type,
+            'feedback_data': feedback_data
+        })
+        
+        if is_successful:
+            print(f"✅ EXPLORATION SUCCESS: Hypothesis {hypothesis_id} validated!")
+        else:
+            print(f"❌ EXPLORATION FAILED: Hypothesis {hypothesis_id} rejected")
+    
+    return {
+        'hypothesis_id': hypothesis_id,
+        'validation_result': 'validated' if is_successful else 'rejected',
+        'is_successful': is_successful
+    }
 
 
 @weave.op()
@@ -240,7 +305,7 @@ Respond in JSON:
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You analyze AI agent feedback. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}

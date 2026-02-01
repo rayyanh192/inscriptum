@@ -53,7 +53,7 @@ You must respond ONLY with valid JSON, no other text. Use this exact format:
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{
                 "role": "system",
                 "content": "You are a JSON-only API. Always respond with valid JSON and nothing else."
@@ -122,6 +122,8 @@ async def decide_action(
     person_info = ""
     if person_context:
         relationship = person_context.get('relationship', {})
+        cluster_context = person_context.get('cluster_context', {})
+        
         person_info = f"""
 Person Context:
 - Name: {person_context.get('name', 'Unknown')}
@@ -131,7 +133,13 @@ Person Context:
 - Expected Response Time: {relationship.get('expected_response_time', 'unknown')}
 - Reply Rate with this sender: {person_context.get('metrics', {}).get('reply_rate', 0):.2%}
 - Starred Rate: {person_context.get('metrics', {}).get('starred_rate', 0):.2%}
-- Delete Rate: {person_context.get('metrics', {}).get('delete_rate', 0):.2%}"""
+- Delete Rate: {person_context.get('metrics', {}).get('delete_rate', 0):.2%}
+
+Cluster Patterns ({relationship.get('type', 'unknown')} - {cluster_context.get('size', 0)} people):
+- Your typical action for this relationship type: {cluster_context.get('typical_action', 'unknown')}
+- Average reply rate for this cluster: {cluster_context.get('avg_reply_rate', 0):.0%}
+- Average star rate for this cluster: {cluster_context.get('avg_star_rate', 0):.0%}
+- Pattern: {cluster_context.get('patterns', 'No patterns learned yet')}"""
 
     # Get importance info
     importance_info = ""
@@ -187,7 +195,7 @@ You must respond ONLY with valid JSON:
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{
                 "role": "system",
                 "content": "You are an intelligent email assistant. You learn from user behavior patterns to make smart decisions. Always respond with valid JSON."

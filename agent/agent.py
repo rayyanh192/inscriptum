@@ -19,6 +19,7 @@ from .execution import store_decision, get_pending_decisions
 from .people_graph import (
     analyze_person, 
     get_person_context, 
+    get_cluster_context,
     cluster_relationships,
     update_person_after_action
 )
@@ -27,6 +28,8 @@ from .style_learning import get_style_for_recipient, analyze_communication_style
 from .response_generator import generate_contextual_response, generate_quick_replies
 from .bootstrap import bootstrap_from_gmail_history
 from .feedback import record_feedback, get_feedback_statistics
+from .exploration import should_explore, generate_alternative_strategy, store_hypothesis
+from .model_updater import apply_learned_rules_to_decision
 
 
 @weave.op()
@@ -34,13 +37,16 @@ async def process_email(email: Dict) -> Dict[str, Any]:
     """
     Main entry point for processing a single email.
     
-    Full pipeline:
+    SELF-LEARNING PIPELINE:
     1. Get/create person context for sender
-    2. Predict importance
-    3. Analyze intent
-    4. Make action decision
-    5. Generate response if needed
-    6. Store decision for Discord bot
+    2. Get cluster context for relationship type
+    3. Predict importance (base prediction)
+    4. Apply learned rules (override if agent has learned better strategy)
+    5. EXPLORE: Try alternative strategies when uncertain
+    6. Analyze intent
+    7. Make final action decision
+    8. Generate response if needed
+    9. Store decision with exploration metadata for feedback loop
     
     Args:
         email: Email data from Firebase
@@ -67,19 +73,65 @@ async def process_email(email: Dict) -> Dict[str, Any]:
         print(f"👤 Person: {person_context.get('name', 'Unknown')} "
               f"(importance: {person_context.get('importance_score', 0.5):.2f})")
         
-        # Step 2: Predict importance
+        # Step 2: Get cluster context for this relationship type
+        relationship_type = person_context.get('relationship', {}).get('type', 'unknown')
+        cluster_context = await get_cluster_context(relationship_type, db)
+        person_context['cluster_context'] = cluster_context
+        
+        print(f"👥 Cluster: {relationship_type} - {cluster_context.get('patterns', 'No patterns')}")
+        
+        # Step 3: Predict importance (BASE PREDICTION)
         importance = await predict_importance(email, person_context, db)
-        print(f"⚡ Importance: {importance['importance_level']} "
+        print(f"⚡ Base Importance: {importance['importance_level']} "
               f"(score: {importance['importance_score']:.2f})")
         
-        # Step 3: Analyze intent
+        # Step 4: Analyze intent
         intent = await analyze_email_intent(email)
         print(f"🎯 Intent: {intent['intent']} "
               f"(confidence: {intent['confidence']:.2f})")
         
-        # Step 4: Make decision
-        decision = await decide_action(email, intent, person_context, importance)
-        print(f"✅ Decision: {decision['action']} - {decision['reason'][:50]}...")
+        # Step 5: Make BASE decision
+        base_decision = await decide_action(email, intent, person_context, importance)
+        print(f"🤖 Base Decision: {base_decision['action']} - {base_decision['reason'][:50]}...")
+        
+        # Step 6: Apply learned rules (AGENT USES WHAT IT DISCOVERED)
+        decision = await apply_learned_rules_to_decision(
+            email, person_context, cluster_context, base_decision, db
+        )
+        
+        if decision.get('learned_rule_id'):
+            print(f"🧠 USING LEARNED RULE: {decision['reasoning']}")
+        else:
+            print(f"✅ Final Decision: {decision['action']}")
+        
+        # Step 7: EXPLORATION - Try alternatives when uncertain
+        exploration_metadata = None
+        if await should_explore(email, decision, db):
+            print(f"🔬 EXPLORING: Low confidence, trying alternative strategy...")
+            
+            alternative = await generate_alternative_strategy(
+                email, decision, person_context, db
+            )
+            
+            # USE THE EXPLORATION (generate_alternative_strategy already stores hypothesis)
+            decision = alternative  # This IS the full decision dict
+            exploration_metadata = {
+                'is_exploration': True,
+                'hypothesis_id': alternative.get('hypothesis_id'),
+                'base_decision': base_decision,
+                'exploration_reason': alternative.get('hypothesis', '')
+            }
+            
+            print(f"🧪 TRYING: {decision['action']} - Hypothesis: {alternative.get('hypothesis', '')[:60]}...")
+        
+        # Step 8: Generate response if needed
+        generated_response = None
+        if decision['action'] == 'respond':
+            style = await get_style_for_recipient(sender, db)
+            generated_response = await generate_contextual_response(
+                email, person_context, importance, style, db
+            )
+            print(f"📝 Generated response: {generated_response.get('subject', 'N/A')}")
         
         # Step 5: Generate response if needed
         generated_response = None
@@ -90,7 +142,7 @@ async def process_email(email: Dict) -> Dict[str, Any]:
             )
             print(f"📝 Generated response: {generated_response.get('subject', 'N/A')}")
         
-        # Step 6: Store decision for Discord bot
+        # Step 9: Store decision for Discord bot (WITH EXPLORATION METADATA)
         result = await store_decision(
             email_id=email_id,
             email_data=email,
@@ -101,9 +153,15 @@ async def process_email(email: Dict) -> Dict[str, Any]:
             generated_response=generated_response
         )
         
+        # Add exploration metadata if this was an exploration
+        if exploration_metadata:
+            db.collection('agent_decisions').document(result['decision_id']).update({
+                'exploration_metadata': exploration_metadata
+            })
+        
         print(f"💾 Stored decision: {result['decision_id']}")
         
-        # Step 7: Update person profile with this interaction
+        # Step 10: Update person profile with this interaction
         await update_person_after_action(sender, decision['action'], db)
         
         return {
@@ -114,6 +172,7 @@ async def process_email(email: Dict) -> Dict[str, Any]:
             "intent": intent,
             "importance": importance,
             "decision": decision,
+            "exploration_metadata": exploration_metadata,
             "generated_response": generated_response,
             "decision_id": result['decision_id'],
             "timestamp": datetime.utcnow().isoformat()

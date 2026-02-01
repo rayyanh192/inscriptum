@@ -19,6 +19,91 @@ groq_client = Groq(api_key=os.getenv('GROQ_API_KEY'))
 
 
 @weave.op()
+async def get_cluster_context(relationship_type: str, db) -> Dict[str, Any]:
+    """
+    Get cluster-wide patterns for a relationship type.
+    Shows how user typically responds to this type of person.
+    
+    Returns cluster statistics like:
+    - Average reply rate for this cluster
+    - Common response patterns
+    - Typical actions taken
+    """
+    # Get cluster document (document ID IS the cluster name)
+    cluster_doc = db.collection('relationship_clusters').document(relationship_type).get()
+    
+    if not cluster_doc.exists:
+        return {
+            "cluster_name": relationship_type,
+            "size": 0,
+            "patterns": "No cluster data available"
+        }
+    
+    cluster_info = cluster_doc.to_dict()
+    people_in_cluster = cluster_info.get('members', [])  # Changed from 'people' to 'members'
+    
+    if not people_in_cluster:
+        return {
+            "cluster_name": relationship_type,
+            "size": cluster_info.get('size', 0),
+            "patterns": f"Cluster has {cluster_info.get('size', 0)} people but no detailed data"
+        }
+    
+    # Calculate cluster-wide metrics from members
+    total_reply_rate = 0
+    total_star_rate = 0
+    total_delete_rate = 0
+    count = 0
+    
+    for member in people_in_cluster[:20]:  # Sample max 20
+        person_email = member.get('email')
+        doc_id = person_email.replace('@', '_at_').replace('.', '_')
+        person_doc = db.collection('people').document(doc_id).get()
+        
+        if person_doc.exists:
+            person_data = person_doc.to_dict()
+            metrics = person_data.get('behavior_metrics', {})
+            
+            total_reply_rate += metrics.get('reply_rate', 0)
+            total_star_rate += metrics.get('starred_rate', 0)
+            total_delete_rate += metrics.get('delete_rate', 0)
+            count += 1
+    
+    if count == 0:
+        return {
+            "cluster_name": relationship_type,
+            "size": len(people_in_cluster),
+            "patterns": "Insufficient data"
+        }
+    
+    # Calculate averages
+    avg_reply_rate = total_reply_rate / count
+    avg_star_rate = total_star_rate / count
+    avg_delete_rate = total_delete_rate / count
+    
+    # Determine typical action
+    if avg_reply_rate > 0.5:
+        typical_action = "reply"
+    elif avg_star_rate > 0.3:
+        typical_action = "star"
+    elif avg_delete_rate > 0.3:
+        typical_action = "delete"
+    else:
+        typical_action = "archive"
+    
+    return {
+        "cluster_name": relationship_type,
+        "size": len(people_in_cluster),
+        "avg_reply_rate": avg_reply_rate,
+        "avg_star_rate": avg_star_rate,
+        "avg_delete_rate": avg_delete_rate,
+        "typical_action": typical_action,
+        "avg_importance": cluster_info.get('avg_importance', 0.5),
+        "patterns": f"You typically {typical_action} emails from {relationship_type} ({avg_reply_rate:.0%} reply rate)"
+    }
+
+
+@weave.op()
 async def analyze_person(email_address: str, emails: List[Dict], db) -> Dict[str, Any]:
     """
     Analyze a person based on all email interactions.
@@ -199,7 +284,7 @@ Respond with ONLY the JSON, no other text."""
 
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "You analyze email relationships. Respond only with valid JSON."},
                 {"role": "user", "content": prompt}
