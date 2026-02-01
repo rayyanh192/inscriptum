@@ -30,8 +30,28 @@ export async function fetchEmails(maxResults = 100) {
 
       const headers = email.data.payload.headers;
       const subject = headers.find(h => h.name === 'Subject')?.value || 'No Subject';
-      const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
+      
+      // Extract email addresses from headers (Gmail returns "Name <email@domain.com>" format)
+      const extractEmail = (headerValue) => {
+        if (!headerValue) return '';
+        const match = headerValue.match(/<([^>]+)>/);  // Extract email from angle brackets
+        if (match) return match[1];  // Found email in brackets
+        // If no brackets, check if it's already just an email
+        if (headerValue.includes('@')) return headerValue.trim();
+        return headerValue.trim();  // Return as-is if no @ symbol
+      };
+      
+      const fromHeader = headers.find(h => h.name === 'From')?.value || 'Unknown';
+      const toHeader = headers.find(h => h.name === 'To')?.value || '';
+      const from = extractEmail(fromHeader);
+      const to = extractEmail(toHeader);
       const date = headers.find(h => h.name === 'Date')?.value || '';
+      
+      // Extract label-based behavior signals (must be before is_sent check)
+      const labelIds = email.data.labelIds || [];
+      
+      // Detect if this is a SENT email (from the user)
+      const is_sent = labelIds.includes('SENT') || from.includes(userEmail);
 
       // Get email body
       let body = '';
@@ -44,8 +64,6 @@ export async function fetchEmails(maxResults = 100) {
         }
       }
 
-      // Extract label-based behavior signals
-      const labelIds = email.data.labelIds || [];
       const is_read = !labelIds.includes('UNREAD');
       const is_starred = labelIds.includes('STARRED');
       const is_deleted = labelIds.includes('TRASH');
@@ -85,6 +103,7 @@ export async function fetchEmails(maxResults = 100) {
         id: message.id,
         subject,
         from,
+        to,
         date,
         body: body.slice(0, 1000), // Limit body length
         timestamp: new Date(date).getTime(),
@@ -95,6 +114,7 @@ export async function fetchEmails(maxResults = 100) {
         is_deleted,
         is_important,
         is_archived,
+        is_sent,
         labels: labelIds,
         thread_id: email.data.threadId || null,
         internal_date,

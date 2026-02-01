@@ -37,11 +37,11 @@ async def generate_visuals():
     fig.suptitle('Self-Learning Email Agent - Real Performance Metrics', fontsize=16, fontweight='bold')
     
     # 1. Accuracy Improvement
-    weeks = ['Week 3\n(oldest)', 'Week 2', 'Week 1\n(recent)']
+    weeks = ['Week 1\n(oldest)', 'Week 2', 'Week 3\n(recent)']
     accuracy_values = [
-        data['accuracy']['week_3'] * 100,
+        data['accuracy']['week_1'] * 100,
         data['accuracy']['week_2'] * 100,
-        data['accuracy']['week_1'] * 100
+        data['accuracy']['week_3'] * 100
     ]
     
     bars1 = ax1.bar(weeks, accuracy_values, color=['#ff6b6b', '#feca57', '#48dbfb'])
@@ -66,9 +66,9 @@ async def generate_visuals():
     
     # 2. Confidence Growth
     confidence_values = [
-        data['confidence']['week_3'] * 100,
+        data['confidence']['week_1'] * 100,
         data['confidence']['week_2'] * 100,
-        data['confidence']['week_1'] * 100
+        data['confidence']['week_3'] * 100
     ]
     
     ax2.plot(weeks, confidence_values, marker='o', linewidth=3, markersize=10, color='#5f27cd')

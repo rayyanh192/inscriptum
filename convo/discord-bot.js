@@ -17,7 +17,7 @@
 
 import dotenv from 'dotenv';
 import express from 'express';
-import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } from 'discord.js';
 import Groq from 'groq-sdk';
 import admin from 'firebase-admin';
 import fs from 'fs';
@@ -66,6 +66,8 @@ const pendingDrafts = new Map();
 const conversationHistory = new Map();
 // Cache of recent email search results
 const emailSearchCache = new Map();
+// Prevent duplicate message processing
+const processedMessages = new Set();
 
 const MAX_HISTORY_LENGTH = 20; // Keep last 20 messages per user
 
@@ -152,8 +154,12 @@ Email:
 - Subject: ${email.subject}
 - Body: ${(email.body || '').slice(0, 500)}
 
+Analyze for:
+1. URGENCY: Is this time-sensitive? (dinner tonight, meeting soon, payment due, deadline, ASAP, urgent)
+2. IMPORTANCE: Does this require immediate attention?
+
 Possible actions:
-- "reply" - Important email that needs a response
+- "reply" - Important email that needs a response (especially if urgent/time-sensitive)
 - "star" - Important but doesn't need immediate response
 - "archive" - Not important, can be archived
 - "ignore" - Spam or irrelevant
@@ -163,6 +169,8 @@ Return JSON only:
   "action": "reply|star|archive|ignore",
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation",
+  "is_urgent": true/false,
+  "is_time_sensitive": true/false,
   "needs_user_input": true/false
 }`;
 
@@ -241,11 +249,11 @@ async function recordFeedback(decisionId, feedbackType, correctAction = null) {
 // ============================================================
 
 let lastScrapeTime = 0;
-const SCRAPE_INTERVAL = 60000; // Scrape every 60 seconds
+const SCRAPE_INTERVAL = 5000; // Scrape every 5 seconds (for testing)
 
 /**
  * Scrape new emails from Gmail and add to Firebase
- * This runs every minute to keep the database up to date
+ * This runs every 5 seconds to keep the database up to date
  */
 async function scrapeNewEmails() {
   const now = Date.now();
@@ -273,15 +281,25 @@ async function scrapeNewEmails() {
           scraped_at: admin.firestore.FieldValue.serverTimestamp()
         });
         newCount++;
-        console.log(`  ✅ New email: "${(email.subject || '').slice(0, 40)}..."`);
+        const sender = email.is_sent ? `TO: ${email.to}` : `FROM: ${email.from}`;
+        console.log(`  ✅ New email: "${(email.subject || '').slice(0, 30)}..." ${sender.slice(0, 40)}`);
         
-        // ADD THE SENDER TO PEOPLE COLLECTION
-        if (email.from) {
+        // ADD THE SENDER TO PEOPLE COLLECTION (only for received emails)
+        if (email.from && !email.is_sent) {
           await addPersonFromEmail(email.from, 'received_email');
         }
-        // Also add recipient if it's a sent email
+        // Add recipient for sent emails
         if (email.to && email.is_sent) {
           await addPersonFromEmail(email.to, 'sent_email');
+        }
+        
+        // Check if this new email should trigger a notification
+        console.log(`  🔍 Checking if email should be notified...`);
+        try {
+          // Process THIS specific email immediately instead of querying all recent ones
+          await checkAndNotifyEmail(email.id);
+        } catch (error) {
+          console.error(`  ❌ Error checking email for notification:`, error.message);
         }
       } else {
         // Email exists - update behavior signals (read/starred/archived status may have changed)
@@ -355,13 +373,8 @@ async function addPersonFromEmail(emailAddress, source) {
       last_email_at: new Date().toISOString()
     });
     console.log(`👤 Added person: ${cleanEmail}`);
-  } else {
-    // Update email count and last seen
-    await personRef.update({
-      email_count: admin.firestore.FieldValue.increment(1),
-      last_email_at: new Date().toISOString()
-    });
   }
+  // Skip updating existing people to reduce quota usage
 }
 
 /**
@@ -565,18 +578,105 @@ async function checkForNewEmails() {
   }
 }
 
+/**
+ * Check and notify for a specific email by ID
+ */
+async function checkAndNotifyEmail(emailId) {
+  try {
+    console.log(`  📋 Processing email: ${emailId}`);
+    const docRef = db.collection('emails').doc(emailId);
+    const doc = await docRef.get();
+    
+    if (!doc.exists) {
+      console.log(`  ❌ Email not found in database`);
+      return;
+    }
+    
+    const email = { id: doc.id, ...doc.data() };
+    
+    // Skip if already notified
+    if (email.discord_notified === true) {
+      console.log(`  ⏩ Already notified`);
+      return;
+    }
+    
+    // Skip SENT emails - only notify about received emails
+    const isSent = email.is_sent || (!email.from && email.to);
+    if (isSent) {
+      await docRef.update({ discord_notified: true });
+      console.log(`  ⏩ Skipped: sent email`);
+      return;
+    }
+    
+    console.log(`  🤖 Processing with agent: "${(email.subject || '').slice(0, 40)}..."`);
+    
+    // Process through agent
+    const decision = await processEmailWithAgent(email);
+    
+    console.log(`  ✅ Agent decision: ${decision.action}, urgent: ${decision.is_urgent}, time-sensitive: ${decision.is_time_sensitive}`);
+    
+    // PRIORITY NOTIFICATION LOGIC
+    const isUrgent = decision.is_urgent || decision.is_time_sensitive;
+    const isImportant = decision.action === 'reply' || decision.action === 'star';
+    const isHighConfidence = decision.confidence && decision.confidence > 0.7;
+    
+    const shouldNotify = isUrgent || isImportant || isHighConfidence;
+    
+    if (!shouldNotify) {
+      await docRef.update({ discord_notified: true });
+      console.log(`  ⏩ Skipped notification: not important enough`);
+      return;
+    }
+    
+    // Log urgency
+    if (isUrgent) {
+      console.log(`  🚨 URGENT EMAIL DETECTED!`);
+    }
+    
+    // Store decision
+    const decisionId = `decision_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    await db.collection('agent_decisions').doc(decisionId).set({
+      ...decision,
+      email_id: email.id || 'unknown',
+      sender: email.from || 'unknown',
+      subject: email.subject || 'No Subject',
+      timestamp: new Date().toISOString(),
+      notified: false
+    });
+
+    // Notify user about important email
+    console.log(`  🔔 SENDING DISCORD NOTIFICATION`);
+    await notifyUserAboutEmail(decisionId, { ...decision, email });
+    
+    // Mark email as notified
+    await docRef.update({ discord_notified: true });
+    console.log(`  ✅ Notification complete`);
+    
+  } catch (error) {
+    console.error('  ❌ Error in checkAndNotifyEmail:', error.message);
+  }
+}
+
 async function checkForUnprocessedEmails() {
   try {
+    console.log(`  📋 Checking for unprocessed emails...`);
     // Simple query - just get recent emails and filter in code
     const snapshot = await db.collection('emails')
       .orderBy('timestamp', 'desc')
       .limit(10)
       .get();
 
-    if (snapshot.empty) return;
+    if (snapshot.empty) {
+      console.log(`  ℹ️ No emails found in database`);
+      return;
+    }
 
+    console.log(`  📧 Found ${snapshot.size} recent emails to check`);
+    
     for (const doc of snapshot.docs) {
       const email = { id: doc.id, ...doc.data() };
+      
+      console.log(`    - Checking: "${(email.subject || '').slice(0, 30)}..." (notified: ${email.discord_notified})`);
       
       // Skip if already notified
       if (email.discord_notified === true) continue;
@@ -586,11 +686,34 @@ async function checkForUnprocessedEmails() {
       if (isSent) {
         // Mark as notified but don't send notification
         await doc.ref.update({ discord_notified: true });
+        console.log(`    ⏩ Skipped: sent email`);
         continue;
       }
       
       // Process through agent
       const decision = await processEmailWithAgent(email);
+      
+      // PRIORITY NOTIFICATION LOGIC:
+      // 1. Always notify if urgent or time-sensitive
+      // 2. Notify if needs reply or should be starred
+      // 3. Notify if high confidence (>70%)
+      const isUrgent = decision.is_urgent || decision.is_time_sensitive;
+      const isImportant = decision.action === 'reply' || decision.action === 'star';
+      const isHighConfidence = decision.confidence && decision.confidence > 0.7;
+      
+      const shouldNotify = isUrgent || isImportant || isHighConfidence;
+      
+      if (!shouldNotify) {
+        // Mark as notified without sending Discord notification
+        await doc.ref.update({ discord_notified: true });
+        console.log(`  ⏩ Skipped notification: "${(email.subject || '').slice(0, 30)}..." (not important)`);
+        continue;
+      }
+      
+      // Log urgency
+      if (isUrgent) {
+        console.log(`  🚨 URGENT EMAIL DETECTED: "${(email.subject || '').slice(0, 30)}..."`);
+      }
       
       // Store decision
       const decisionId = `decision_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -603,7 +726,8 @@ async function checkForUnprocessedEmails() {
         notified: false
       });
 
-      // Notify user
+      // Notify user about important email
+      console.log(`  🔔 Notifying: "${(email.subject || '').slice(0, 30)}..." (${decision.action})`);
       await notifyUserAboutEmail(decisionId, { ...decision, email });
       
       // Mark email as notified
@@ -634,21 +758,39 @@ async function notifyUserAboutEmail(decisionId, decision) {
   // Store for feedback tracking
   pendingDecisions.set(decisionId, { decision, email });
 
-  // Color based on action
-  const colors = {
-    reply: 0xFF6B6B,    // Red - needs response
-    star: 0xFFE66D,     // Yellow - important
-    archive: 0x4ECDC4,  // Teal - can archive
-    ignore: 0x95A5A6    // Gray - spam
-  };
+  // Color based on urgency and action
+  let embedColor;
+  if (decision.is_urgent || decision.is_time_sensitive) {
+    embedColor = 0xFF0000;  // Bright red for urgent
+  } else {
+    const colors = {
+      reply: 0xFF6B6B,    // Red - needs response
+      star: 0xFFE66D,     // Yellow - important
+      archive: 0x4ECDC4,  // Teal - can archive
+      ignore: 0x95A5A6    // Gray - spam
+    };
+    embedColor = colors[action] || 0x7289DA;
+  }
 
+  // Build urgency indicator
+  let urgencyEmoji = '';
+  if (decision.is_urgent) urgencyEmoji = '🚨 URGENT';
+  else if (decision.is_time_sensitive) urgencyEmoji = '⏰ TIME-SENSITIVE';
+  
+  const titlePrefix = urgencyEmoji ? `${urgencyEmoji} - ` : '';
+
+  // Build email body preview (first 500 chars)
+  const emailBody = email.body || email.snippet || 'No content';
+  const bodyPreview = emailBody.length > 500 ? emailBody.slice(0, 500) + '...' : emailBody;
+  
   const embed = new EmbedBuilder()
-    .setColor(colors[action] || 0x7289DA)
-    .setTitle(`${isSent ? '📤' : '📧'} ${email.subject || 'New Email'}`)
+    .setColor(embedColor)
+    .setTitle(`${titlePrefix}${isSent ? '📤' : '📧'} ${email.subject || 'New Email'}`)
     .addFields(
       { name: isSent ? 'To' : 'From', value: isSent ? (email.to || 'Unknown') : (email.from || 'Unknown'), inline: true },
       { name: 'Action', value: action.toUpperCase(), inline: true },
-      { name: 'Confidence', value: `${Math.round(confidence * 100)}%`, inline: true }
+      { name: 'Confidence', value: `${Math.round(confidence * 100)}%`, inline: true },
+      { name: 'Email Content', value: bodyPreview, inline: false }
     )
     .setDescription(decision.reasoning || 'No reasoning provided')
     .setTimestamp();
@@ -700,33 +842,66 @@ async function notifyUserAboutEmail(decisionId, decision) {
 // RESPONSE GENERATION
 // ============================================================
 
-async function generateDraftResponse(email) {
-  // Get user's recent sent emails to learn style
-  const sentEmails = await db.collection('emails')
-    .where('is_sent', '==', true)
-    .orderBy('timestamp', 'desc')
-    .limit(5)
-    .get();
+async function generateDraftResponse(email, userMessage) {
+  try {
+    // Get SENDER's previous emails to learn THEIR style (how they write to you)
+    const senderEmail = email.from;
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Query timeout')), 5000)
+    );
+    
+    // Query emails FROM this sender (emails you received from them)
+    const queryPromise = db.collection('emails')
+      .orderBy('timestamp', 'desc')
+      .limit(50)
+      .get();
+    
+    let styleExamples = [];
+    try {
+      const allEmails = await Promise.race([queryPromise, timeoutPromise]);
+      allEmails.forEach(doc => {
+        const emailData = doc.data();
+        // Only get emails FROM the sender (not sent TO them)
+        if (emailData.from === senderEmail && !emailData.is_sent && emailData.body && emailData.body.length > 20) {
+          styleExamples.push({
+            subject: emailData.subject || '',
+            body: emailData.body.slice(0, 400)
+          });
+        }
+      });
+    } catch (error) {
+      console.log('⚠️ Could not fetch sender emails for style:', error.message);
+      // Continue without style examples
+    }
 
-  let styleContext = '';
-  sentEmails.forEach(doc => {
-    const sent = doc.data();
-    styleContext += `\nExample sent email:\nSubject: ${sent.subject}\nBody: ${sent.body?.slice(0, 200)}\n`;
-  });
+    let styleContext = '';
+    if (styleExamples.length > 0) {
+      styleContext = `\n\nSENDER'S WRITING STYLE (how ${senderEmail} writes):\n`;
+      styleExamples.slice(0, 3).forEach((ex, i) => {
+        styleContext += `\nExample ${i+1}:\nSubject: ${ex.subject}\nBody: ${ex.body}\n`;
+      });
+      styleContext += '\n---\nMatch this person\'s style: tone, formality, length, punctuation, emoji usage.';
+    }
 
-  const prompt = `You are helping draft an email response. Match the user's writing style based on their recent emails.
+    const prompt = `You are responding to an email. Write in a style that MIRRORS how the sender writes.
 
+CRITICAL INSTRUCTIONS:
+1. The user wants to convey: "${userMessage}"
+2. Write the response matching the SENDER'S style from their examples below
+3. If they write casual → write casual. If formal → write formal
+4. Match their typical length, tone, punctuation patterns
+5. Mirror their greeting/closing style (or lack thereof)
 ${styleContext}
 
-Now draft a response to this email:
+EMAIL YOU'RE RESPONDING TO:
 From: ${email.from}
 Subject: ${email.subject}
-Body: ${(email.body || '').slice(0, 500)}
+Body: ${(email.body || '').slice(0, 600)}
 
-Write a natural, concise response that sounds like the user wrote it. Keep it brief and professional.
-Just write the email body, no subject line needed.`;
+USER WANTS TO SAY: "${userMessage}"
 
-  try {
+Write a response that mirrors ${email.from}'s style. Make it feel natural like a reply in their conversational style.`;
+
     const completion = await groq.chat.completions.create({
       messages: [{ role: 'user', content: prompt }],
       model: 'llama-3.1-8b-instant',
@@ -746,6 +921,60 @@ Just write the email body, no subject line needed.`;
 // ============================================================
 
 client.on('interactionCreate', async (interaction) => {
+  // Handle modal submissions
+  if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith('draftmodal_')) {
+      try {
+        await interaction.deferReply();
+        
+        const decisionId = interaction.customId.replace('draftmodal_', '');
+        const pending = pendingDecisions.get(decisionId);
+        
+        if (!pending || !pending.email) {
+          await interaction.editReply('❌ Could not find the email. It may have expired.');
+          return;
+        }
+
+        const userMessage = interaction.fields.getTextInputValue('responseText');
+        const draft = await generateDraftResponse(pending.email, userMessage);
+        
+        // Store draft for sending
+        const draftId = `draft_${Date.now()}`;
+        pendingDrafts.set(draftId, { email: pending.email, draft, decisionId });
+
+        const embed = new EmbedBuilder()
+          .setColor(0x7289DA)
+          .setTitle('📝 Draft Response')
+          .setDescription(draft)
+          .addFields({ name: 'To', value: pending.email.from, inline: true })
+          .setFooter({ text: 'Review and send, or edit as needed' });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`send_${draftId}`)
+            .setLabel('📤 Send')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`edit_${draftId}`)
+            .setLabel('✏️ Edit')
+            .setStyle(ButtonStyle.Primary),
+          new ButtonBuilder()
+            .setCustomId(`discard_${draftId}`)
+            .setLabel('🗑️ Discard')
+            .setStyle(ButtonStyle.Danger)
+        );
+
+        await interaction.editReply({ embeds: [embed], components: [row] });
+      } catch (error) {
+        console.error('Modal submission error:', error);
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: '❌ Something went wrong. Please try again.', ephemeral: true });
+        }
+      }
+    }
+    return;
+  }
+
   if (!interaction.isButton()) return;
 
   const [action, decisionId] = interaction.customId.split('_').reduce((acc, part, i, arr) => {
@@ -758,48 +987,36 @@ client.on('interactionCreate', async (interaction) => {
   try {
     // ---- CONFIRM CORRECT ----
     if (interaction.customId.startsWith('confirm_')) {
+      console.log(`✅ Confirming decision: ${decisionId}`);
       await recordFeedback(decisionId, 'action_correct');
       await interaction.reply({ content: '✅ Got it! I\'ll remember this for similar emails.', ephemeral: true });
     }
 
     // ---- DRAFT RESPONSE ----
     else if (interaction.customId.startsWith('draft_')) {
-      await interaction.deferReply();
-      
       if (!pending || !pending.email) {
-        await interaction.editReply('❌ Could not find the email. It may have expired.');
+        await interaction.reply({ content: '❌ Could not find the email. It may have expired.', ephemeral: true });
         return;
       }
 
-      const draft = await generateDraftResponse(pending.email);
-      
-      // Store draft for sending
-      const draftId = `draft_${Date.now()}`;
-      pendingDrafts.set(draftId, { email: pending.email, draft, decisionId });
+      // Show modal to ask what user wants to say
+      const modal = new ModalBuilder()
+        .setCustomId(`draftmodal_${decisionId}`)
+        .setTitle('What do you want to say?');
 
-      const embed = new EmbedBuilder()
-        .setColor(0x7289DA)
-        .setTitle('📝 Draft Response')
-        .setDescription(draft)
-        .addFields({ name: 'To', value: pending.email.from, inline: true })
-        .setFooter({ text: 'Review and send, or edit as needed' });
+      const responseInput = new TextInputBuilder()
+        .setCustomId('responseText')
+        .setLabel('Your message (I\'ll match your style)')
+        .setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('e.g., "yeah I\'m coming, see you at 7"')
+        .setRequired(true)
+        .setMaxLength(1000);
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`send_${draftId}`)
-          .setLabel('📤 Send')
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`edit_${draftId}`)
-          .setLabel('✏️ Edit')
-          .setStyle(ButtonStyle.Primary),
-        new ButtonBuilder()
-          .setCustomId(`discard_${draftId}`)
-          .setLabel('🗑️ Discard')
-          .setStyle(ButtonStyle.Danger)
-      );
+      const row = new ActionRowBuilder().addComponents(responseInput);
+      modal.addComponents(row);
 
-      await interaction.editReply({ embeds: [embed], components: [row] });
+      await interaction.showModal(modal);
+      return;
     }
 
     // ---- SEND EMAIL ----
@@ -834,6 +1051,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // ---- SHOULD REPLY ----
     else if (interaction.customId.startsWith('should_reply_')) {
+      console.log(`📝 Should reply feedback: ${decisionId}`);
       await recordFeedback(decisionId, 'action_wrong', 'reply');
       await interaction.reply({ 
         content: '📝 Got it! I\'ll suggest replying to similar emails in the future.\nWould you like me to draft a response?',
@@ -902,15 +1120,16 @@ async function searchEmails(query) {
   const keywords = queryLower.split(/\s+/).filter(w => w.length > 2);
   const results = [];
   
-  // Detect search intent: "from X" vs "to X" vs "sent to X"
+  // Detect search intent: "from X" vs "to X" vs "sent to X" vs "recent"
   const fromMatch = queryLower.match(/(?:from|by)\s+(\w+)/);
   const toMatch = queryLower.match(/(?:to|sent to|sent)\s+(\w+)/);
+  const isRecentQuery = /recent|latest|new|last/.test(queryLower);
   
   const searchFromPerson = fromMatch ? fromMatch[1] : null;  // Looking for emails RECEIVED from this person
   const searchToPerson = toMatch ? toMatch[1] : null;        // Looking for emails SENT to this person
   
   console.log(`[Search] Query: "${query}"`);
-  console.log(`[Search] Looking for emails FROM: ${searchFromPerson || 'any'}, TO: ${searchToPerson || 'any'}`);
+  console.log(`[Search] Looking for emails FROM: ${searchFromPerson || 'any'}, TO: ${searchToPerson || 'any'}, RECENT: ${isRecentQuery}`);
   
   try {
     const snapshot = await db.collection('emails')
@@ -970,14 +1189,19 @@ async function searchEmails(query) {
         });
       }
       
-      if (matchScore > 0) {
+      if (matchScore > 0 || isRecentQuery) {
         results.push({ ...email, matchScore, isSent });
       }
     });
     
-    // Sort by match score
-    results.sort((a, b) => b.matchScore - a.matchScore);
-    console.log(`[Search] Found ${results.length} matching emails`);
+    // Sort by timestamp if asking for recent, otherwise by match score
+    if (isRecentQuery) {
+      results.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      console.log(`[Search] Found ${results.length} recent emails (sorted by time)`);
+    } else {
+      results.sort((a, b) => b.matchScore - a.matchScore);
+      console.log(`[Search] Found ${results.length} matching emails (sorted by relevance)`);
+    }
     return results.slice(0, 5);
   } catch (error) {
     console.error('Email search error:', error);
@@ -1011,6 +1235,17 @@ function addToHistory(userId, role, content) {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channel.id !== process.env.DISCORD_CHANNEL_ID) return;
+
+  // Prevent duplicate processing of the same message
+  if (processedMessages.has(message.id)) return;
+  processedMessages.add(message.id);
+  
+  // Clean up old message IDs (keep last 100)
+  if (processedMessages.size > 100) {
+    const arr = Array.from(processedMessages);
+    processedMessages.clear();
+    arr.slice(-50).forEach(id => processedMessages.add(id));
+  }
 
   const userId = message.author.id;
   const userMessage = message.content;
@@ -1141,19 +1376,24 @@ client.once('ready', async () => {
       ]
     });
 
-    // Start monitoring
-    console.log('🔄 Starting email monitoring...');
-    setInterval(checkForNewEmails, 60000); // Check Firebase every 60 seconds (reduced from 10s)
+    // Enable automatic notifications for important/time-sensitive emails
+    console.log('🔔 Email notifications ENABLED (will alert on important emails)');
     
-    // Start continuous Gmail scraping
-    console.log('📥 Starting Gmail scraper (every 60 seconds)...');
+    // Check for any existing important unprocessed emails on startup
+    console.log('🔍 Checking for existing important emails...');
+    await checkForUnprocessedEmails();
+    
+    // Start continuous Gmail scraping (every 5 SECONDS for testing)
+    console.log('📥 Starting Gmail scraper (every 5 seconds)...');
     await scrapeNewEmails(); // Initial scrape
-    setInterval(scrapeNewEmails, 60000); // Then every 60 seconds
+    setInterval(scrapeNewEmails, 5000); // Every 5 seconds for testing
     
-    // Backfill people from existing emails (one-time on startup)
-    console.log('👥 Backfilling people from existing emails...');
-    // Skip backfill on startup - it was causing quota issues
-    // People will be added as new emails come in
+    // Periodically check for unprocessed emails (every 2 minutes)
+    setInterval(async () => {
+      console.log('🔄 Periodic check for unprocessed emails...');
+      await checkForUnprocessedEmails();
+    }, 120000); // Every 2 minutes
+    
     console.log('👥 People will be added as new emails arrive');
   } else {
     console.error('❌ Could not find notification channel!');
