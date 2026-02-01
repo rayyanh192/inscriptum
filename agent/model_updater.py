@@ -62,6 +62,10 @@ async def apply_learned_rules_to_decision(
     
     Agent checks if it has learned a BETTER strategy for this email.
     If yes, uses learned strategy instead of base prediction.
+    
+    PRIORITY ORDER:
+    1. Rules with specific conditions (more conditions = higher priority)
+    2. Rules with higher confidence
     """
     
     # Get all active learned rules
@@ -69,29 +73,36 @@ async def apply_learned_rules_to_decision(
     for doc in db.collection('learned_rules').where('status', '==', 'active').stream():
         rules.append(doc.to_dict())
     
-    # Sort by confidence (use most confident rules first)
-    rules.sort(key=lambda r: r.get('confidence', 0), reverse=True)
+    # Sort by: 1) number of conditions (more specific first), 2) confidence
+    def rule_priority(r):
+        num_conditions = len(r.get('conditions', {}))
+        confidence = r.get('confidence', 0)
+        # Prioritize specific rules (with conditions) over general ones
+        return (num_conditions, confidence)
+    
+    rules.sort(key=rule_priority, reverse=True)
     
     # Check each rule to see if it applies
     for rule in rules:
         if rule_matches(rule, email, person_context, cluster_context):
             # RULE APPLIES - Override base prediction
-            print(f"🧠 Applying learned rule: {rule['pattern']}")
+            pattern_desc = rule.get('pattern', rule.get('description', 'Learned rule'))
+            print(f"🧠 Applying learned rule: {pattern_desc}")
             
             # Record that we used this learned rule
             db.collection('rule_applications').add({
-                'rule_id': rule['id'],
+                'rule_id': rule.get('id', 'unknown'),
                 'email_id': email.get('message_id'),
                 'timestamp': datetime.utcnow().isoformat(),
                 'overrode_base_prediction': base_prediction['action'],
-                'used_learned_action': rule['action']
+                'used_learned_action': rule.get('action', 'unknown')
             })
             
             return {
-                'action': rule['action'],
-                'confidence': rule['confidence'],
-                'reasoning': f"Learned rule: {rule['pattern']}",
-                'learned_rule_id': rule['id'],
+                'action': rule.get('action', base_prediction['action']),
+                'confidence': rule.get('confidence', 0.7),
+                'reasoning': f"Learned rule: {pattern_desc}",
+                'learned_rule_id': rule.get('id'),
                 'base_prediction': base_prediction  # Keep for comparison
             }
     
@@ -132,6 +143,11 @@ def rule_matches(rule: Dict, email: Dict, person_context: Dict, cluster_context:
         elif key == 'subject_contains':
             subject = email.get('subject', '').lower()
             if expected_value.lower() not in subject:
+                return False
+        
+        elif key == 'sender_contains':
+            sender = email.get('from', '').lower()
+            if expected_value.lower() not in sender:
                 return False
         
         elif key == 'importance_score':

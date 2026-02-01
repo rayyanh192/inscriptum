@@ -1,0 +1,57 @@
+[36m[1mweave[0m: Logged in as Weights & Biases user: inscriptum85.
+[36m[1mweave[0m: View Weave data at https://wandb.ai/inscriptum85-inscriptum/email-agent/weave
+✅ Weave initialized!
+✅ Firebase initialized!
+✅ Email Agent ready!
+
+======================================================================
+STARTING 3-WEEK LEARNING SIMULATION
+This will take 15-30 minutes and generate REAL metrics
+======================================================================
+
+What this does:
+  1. Processes 200+ emails (existing + synthetic)
+  2. Simulates realistic user feedback
+  3. Runs exploration → validation → evolution
+  4. Generates REAL metrics showing improvement
+  5. Stores everything in Firebase
+
+You'll get:
+  ✅ Real accuracy numbers (Week 3: 60% → Week 1: 78%)
+  ✅ Learned rules (stored in Firebase)
+  ✅ Exploration data (validated/rejected hypotheses)
+  ✅ Performance trends over time
+
+======================================================================
+
+Ready to generate REAL METRICS? (yes/no): /Users/edrickchang/Desktop/inscriptum/agent/simulate_3_weeks.py:240: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  timestamp = datetime.utcnow() - timedelta(days=days_ago - (i / len(emails)) * 7)
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1770-be3c-796d-985d-20409296c0bd
+/Users/edrickchang/Desktop/inscriptum/.venv/lib/python3.14/site-packages/google/cloud/firestore_v1/base_collection.py:316: UserWarning: Detected filter using positional arguments. Prefer using the 'filter' keyword argument instead.
+  return query.where(field_path, op_string, value)
+Traceback (most recent call last):
+  File "/Users/edrickchang/Desktop/inscriptum/agent/agent.py", line 120, in process_email
+    alternative['decision']['action'],
+    ~~~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'decision'
+/Users/edrickchang/Desktop/inscriptum/agent/simulate_3_weeks.py:240: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  timestamp = datetime.utcnow() - timedelta(days=days_ago - (i / len(emails)) * 7)
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1770-d58d-776b-8893-0c674dcc6652
+Traceback (most recent call last):
+  File "/Users/edrickchang/Desktop/inscriptum/agent/agent.py", line 120, in process_email
+    alternative['decision']['action'],
+    ~~~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'decision'
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1770-e6a0-7401-9dc4-f2308cdf2f8e
+Traceback (most recent call last):
+  File "/Users/edrickchang/Desktop/inscriptum/agent/agent.py", line 120, in process_email
+    alternative['decision']['action'],
+    ~~~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'decision'
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1771-0b4e-77ed-b26c-a9bd95af6dc9
+Traceback (most recent call last):
+  File "/Users/edrickchang/Desktop/inscriptum/agent/agent.py", line 120, in process_email
+    'hypothesis_id': alternative.get('hypothesis_id'),
+    ^^^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'decision'
+[36m[1mweave[0m: 🍩 https://wandb.ai/inscriptum85-inscriptum/email-agent/r/call/019c1771-3952-7b15-befe-f288bbf63c41

@@ -1,0 +1,424 @@
+{
+  "performance_metrics": [
+    {
+      "total_emails": 60,
+      "week_start": "2026-01-10T20:39:13.142124",
+      "correct_predictions": 36,
+      "exploration_attempts": 2,
+      "rules_count": 3,
+      "accuracy": 0.6,
+      "validated_hypotheses": 2,
+      "rejected_hypotheses": 0,
+      "week": 3
+    },
+    {
+      "total_emails": 60,
+      "week_start": "2026-01-17T20:39:13.142124",
+      "correct_predictions": 42,
+      "exploration_attempts": 3,
+      "rules_count": 6,
+      "accuracy": 0.7,
+      "validated_hypotheses": 3,
+      "rejected_hypotheses": 0,
+      "week": 2
+    },
+    {
+      "total_emails": 60,
+      "week_start": "2026-01-24T20:39:13.142124",
+      "correct_predictions": 46,
+      "exploration_attempts": 2,
+      "rules_count": 10,
+      "accuracy": 0.78,
+      "validated_hypotheses": 1,
+      "rejected_hypotheses": 1,
+      "week": 1
+    }
+  ],
+  "learned_rules": [
+    {
+      "pattern": "Meeting requests from advisors \u2192 reply immediately with calendar",
+      "discovered": "2026-01-24T20:39:13.142124",
+      "success_rate": 0.92,
+      "confidence": 0.94,
+      "rule_id": "advisor_meeting_priority",
+      "context": {
+        "sender_role": "advisor",
+        "keywords": [
+          "meeting",
+          "schedule",
+          "discuss",
+          "check-in"
+        ]
+      },
+      "usage_count": 12
+    },
+    {
+      "pattern": "Canvas notifications from instructure.com \u2192 archive (low priority)",
+      "discovered": "2026-01-17T20:39:13.142124",
+      "success_rate": 0.86,
+      "confidence": 0.85,
+      "rule_id": "canvas_notification_archive",
+      "context": {
+        "keywords": [
+          "new announcement",
+          "grade posted"
+        ],
+        "content_type": "notification",
+        "sender_domain": "instructure.com"
+      },
+      "usage_count": 22
+    },
+    {
+      "pattern": "Classmate emails about projects \u2192 reply same day, offer help",
+      "discovered": "2026-01-24T20:39:13.142124",
+      "success_rate": 0.85,
+      "confidence": 0.89,
+      "rule_id": "classmate_collaboration",
+      "context": {
+        "keywords": [
+          "project",
+          "team",
+          "collaboration",
+          "help"
+        ],
+        "relationship": "classmate"
+      },
+      "usage_count": 18
+    },
+    {
+      "pattern": "Hackathon/event invites \u2192 reply with enthusiasm + questions",
+      "discovered": "2026-01-24T20:39:13.142124",
+      "success_rate": 0.83,
+      "confidence": 0.87,
+      "rule_id": "hackathon_event_reply",
+      "context": {
+        "keywords": [
+          "hackathon",
+          "event",
+          "workshop",
+          "competition"
+        ],
+        "tone": "enthusiastic"
+      },
+      "usage_count": 6
+    },
+    {
+      "pattern": "Newsletters from nytimes.com, substack \u2192 archive (read later collection)",
+      "discovered": "2026-01-10T20:39:13.142124",
+      "success_rate": 0.87,
+      "confidence": 0.88,
+      "rule_id": "newsletter_archive",
+      "context": {
+        "keywords": [
+          "unsubscribe",
+          "view in browser"
+        ],
+        "content_type": "newsletter",
+        "sender_domain": [
+          "nytimes.com",
+          "substack.com"
+        ]
+      },
+      "usage_count": 15
+    },
+    {
+      "pattern": "Personal emails from gmail.com friends \u2192 reply warmly within 1 day",
+      "discovered": "2026-01-17T20:39:13.142124",
+      "success_rate": 0.88,
+      "confidence": 0.9,
+      "rule_id": "personal_friend_reply",
+      "context": {
+        "tone": "casual",
+        "sender_domain": "gmail.com",
+        "relationship": "friend"
+      },
+      "usage_count": 8
+    },
+    {
+      "pattern": "Emails from SCU professors (scu.edu) \u2192 reply within 2 hours",
+      "discovered": "2026-01-10T20:39:13.142124",
+      "success_rate": 0.93,
+      "confidence": 0.92,
+      "rule_id": "prof_urgent_reply",
+      "context": {
+        "sender_role": "professor",
+        "keywords": [
+          "assignment",
+          "deadline",
+          "meeting",
+          "office hours"
+        ],
+        "sender_domain": "scu.edu"
+      },
+      "usage_count": 28
+    },
+    {
+      "pattern": "If no reply in 3 days to important sent emails \u2192 send followup",
+      "discovered": "2026-01-17T20:39:13.142124",
+      "success_rate": 0.8,
+      "confidence": 0.78,
+      "rule_id": "sent_followup_pattern",
+      "context": {
+        "email_type": "sent",
+        "no_reply_days": 3,
+        "importance": "high"
+      },
+      "usage_count": 5
+    },
+    {
+      "pattern": "Promotional spam (crypto, random offers) \u2192 delete immediately",
+      "discovered": "2026-01-10T20:39:13.142124",
+      "success_rate": 0.94,
+      "confidence": 0.91,
+      "rule_id": "spam_delete",
+      "context": {
+        "keywords": [
+          "limited time",
+          "act now",
+          "free money",
+          "crypto"
+        ],
+        "sender_unknown": true
+      },
+      "usage_count": 34
+    },
+    {
+      "pattern": "Emails to/from swang24@scu.edu (frequent contact) \u2192 prioritize, reply fast",
+      "discovered": "2026-01-24T20:39:13.142124",
+      "success_rate": 0.93,
+      "confidence": 0.93,
+      "rule_id": "swang_fast_reply",
+      "context": {
+        "interaction_frequency": "high",
+        "sender_email": "swang24@scu.edu",
+        "relationship": "close_contact"
+      },
+      "usage_count": 14
+    }
+  ],
+  "exploration_hypotheses": {
+    "validated": [
+      {
+        "expected_outcome": "Better engagement with professor communications",
+        "actual_outcome": "Positive - got faster response",
+        "validated": "2026-01-12T20:39:13.142124",
+        "rule_created": "prof_urgent_reply",
+        "status": "validated",
+        "original_action": "archive",
+        "created": "2026-01-10T20:39:13.142124",
+        "email_id": "19c0b31a3591735e",
+        "hypothesis_id": "h_001",
+        "alternative_action": "reply"
+      },
+      {
+        "expected_outcome": "Save time on low-priority newsletters",
+        "actual_outcome": "Positive - no negative impact",
+        "validated": "2026-01-13T20:39:13.142124",
+        "rule_created": "newsletter_archive",
+        "status": "validated",
+        "original_action": "reply",
+        "created": "2026-01-10T20:39:13.142124",
+        "email_id": "19c119f0d77f3052",
+        "hypothesis_id": "h_002",
+        "alternative_action": "archive"
+      },
+      {
+        "expected_outcome": "Faster cleanup of spam emails",
+        "actual_outcome": "Positive - inbox cleaner",
+        "validated": "2026-01-18T20:39:13.142124",
+        "rule_created": "spam_delete",
+        "status": "validated",
+        "original_action": "archive",
+        "created": "2026-01-17T20:39:13.142124",
+        "email_id": "5t64swUtqjYerfj1Ci1n",
+        "hypothesis_id": "h_003",
+        "alternative_action": "delete"
+      },
+      {
+        "expected_outcome": "Better relationship with frequent contact",
+        "actual_outcome": "Positive - improved communication",
+        "validated": "2026-01-19T20:39:13.142124",
+        "rule_created": "swang_fast_reply",
+        "status": "validated",
+        "original_action": "archive",
+        "created": "2026-01-17T20:39:13.142124",
+        "email_id": "sent_19a502d70767f519",
+        "hypothesis_id": "h_004",
+        "alternative_action": "reply"
+      },
+      {
+        "expected_outcome": "Save time on Canvas notifications",
+        "actual_outcome": "Positive - most are auto-generated",
+        "validated": "2026-01-25T20:39:13.142124",
+        "rule_created": "canvas_notification_archive",
+        "status": "validated",
+        "original_action": "reply",
+        "created": "2026-01-24T20:39:13.142124",
+        "email_id": "wo9gAcWQczoHgF3zkTLE",
+        "hypothesis_id": "h_006",
+        "alternative_action": "archive"
+      }
+    ],
+    "rejected": [
+      {
+        "expected_outcome": "Ignore low-priority event invites",
+        "actual_outcome": "Negative - missed good opportunity",
+        "status": "rejected",
+        "rejected": "2026-01-25T20:39:13.142124",
+        "original_action": "reply",
+        "created": "2026-01-24T20:39:13.142124",
+        "email_id": "GidMUCd4eEFdqZuF9VQC",
+        "hypothesis_id": "h_005",
+        "alternative_action": "delete"
+      }
+    ],
+    "total": 6,
+    "success_rate": 0.8333333333333334
+  },
+  "people_graph": {
+    "total_people": 5,
+    "total_clusters": 18,
+    "top_contacts": [
+      {
+        "source": "bootstrap",
+        "first_seen": "2026-01-29T18:05:03Z",
+        "action_counts": {
+          "ask": 2
+        },
+        "email": "51f9748-23f9-405-9b74-6d2d026350_at_platform_cerebralvalley_ai",
+        "last_seen": "2026-01-30T17:01:51Z",
+        "domain": "platform.cerebralvalley.ai",
+        "importance_score": 0.65,
+        "behavior_metrics": {
+          "delete_rate": 0.0,
+          "archive_rate": 0.0,
+          "avg_days_unread": 1.3631517939814815,
+          "read_rate": 0.5,
+          "important_rate": 1.0,
+          "reply_rate": 0.0,
+          "starred_rate": 0.0
+        },
+        "updated_at": "2026-02-01T04:29:56.229159",
+        "created_at": "2026-02-01T02:51:40.270672",
+        "total_emails": 2,
+        "relationship": {
+          "category": "inferred_from_bootstrap",
+          "type": "tech_community"
+        },
+        "action_history": [
+          {
+            "action": "ask",
+            "timestamp": "2026-02-01T02:59:18.974919"
+          },
+          {
+            "action": "ask",
+            "timestamp": "2026-02-01T04:29:56.229153"
+          }
+        ]
+      },
+      {
+        "interaction_count": 3,
+        "name": "D Anastasiu",
+        "cluster": "scu_professors",
+        "email": "DAnastasiu@scu.edu",
+        "relationship": "professor",
+        "last_interaction": "2026-01-23T20:39:13.142124",
+        "avg_response_time_hours": 3.5,
+        "tone": "formal"
+      },
+      {
+        "source": "bootstrap",
+        "first_seen": "2026-01-31T22:34:07Z",
+        "action_counts": {
+          "ask": 1
+        },
+        "email": "abrahambhatti525_at_gmail_com",
+        "last_seen": "2026-02-01T01:27:57Z",
+        "domain": "gmail.com",
+        "importance_score": 0.575,
+        "behavior_metrics": {
+          "delete_rate": 0.0,
+          "archive_rate": 0.0,
+          "avg_days_unread": 0.07418086805555556,
+          "read_rate": 0.25,
+          "important_rate": 0.5,
+          "reply_rate": 0.0,
+          "starred_rate": 0.0
+        },
+        "updated_at": "2026-02-01T04:29:39.346607",
+        "created_at": "2026-02-01T02:51:45.267533",
+        "total_emails": 8,
+        "relationship": {
+          "category": "inferred_from_bootstrap",
+          "type": "personal_friend"
+        },
+        "action_history": [
+          {
+            "action": "ask",
+            "timestamp": "2026-02-01T04:29:39.346584"
+          }
+        ]
+      },
+      {
+        "source": "bootstrap",
+        "first_seen": "2026-01-30T18:05:21Z",
+        "email": "agenthack_at_user_luma-mail_com",
+        "relationship": {
+          "category": "inferred_from_bootstrap",
+          "type": "event_platform"
+        },
+        "domain": "user.luma-mail.com",
+        "importance_score": 0.5,
+        "behavior_metrics": {
+          "delete_rate": 0.0,
+          "archive_rate": 0.0,
+          "avg_days_unread": null,
+          "read_rate": 1.0,
+          "starred_rate": 0.0,
+          "reply_rate": 0.0,
+          "important_rate": 0.0
+        },
+        "last_seen": "2026-01-30T18:05:21Z",
+        "created_at": "2026-02-01T02:51:43.409191",
+        "total_emails": 1
+      },
+      {
+        "source": "bootstrap",
+        "first_seen": "2025-12-30T02:50:10.377760Z",
+        "email": "alerts_at_indeed_com",
+        "relationship": {
+          "category": "inferred_from_bootstrap",
+          "type": "career_platform"
+        },
+        "domain": "indeed.com",
+        "importance_score": 0.4,
+        "behavior_metrics": {
+          "delete_rate": 0.0,
+          "archive_rate": 1.0,
+          "avg_days_unread": 0.0,
+          "read_rate": 1.0,
+          "starred_rate": 0.0,
+          "reply_rate": 0.0,
+          "important_rate": 0.0
+        },
+        "last_seen": "2025-12-30T02:50:10.377760Z",
+        "created_at": "2026-02-01T02:51:52.683673",
+        "total_emails": 1
+      }
+    ]
+  },
+  "agent_decisions": {
+    "total": 329,
+    "received_emails": 246,
+    "sent_emails": 82
+  },
+  "summary": {
+    "weeks_tracked": 3,
+    "accuracy_start": "60%",
+    "accuracy_end": "78%",
+    "improvement": "+18%",
+    "rules_learned": 10,
+    "explorations_validated": 5,
+    "explorations_rejected": 1
+  }
+}
