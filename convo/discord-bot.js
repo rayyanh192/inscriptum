@@ -1201,18 +1201,6 @@ async function handleAutomationUserInput(message, pendingInput) {
 
   try {
     await fillKnownFields(automation.stagehand, nextContext);
-    await automation.stagehand.act('ensure the field you just filled is no longer empty');
-    try {
-      await automation.stagehand.act('click the next, continue, or submit button if it is available');
-      await automation.stagehand.act('wait for any page updates after clicking next or continue');
-    } catch (error) {
-      // Fallback: nudge focus forward to the next field
-      try {
-        await automation.page.keyboard.press('Tab');
-      } catch (keyboardError) {
-        // Ignore if keyboard press fails
-      }
-    }
     pendingAutomationInputs.delete(message.author.id);
     await updateAutomationState(decisionId, automation.emailId, {
       status: 'running',

@@ -79,7 +79,20 @@ export async function fetchEmails(maxResults = 100, options = {}) {
 
       // Extract links from body (basic URL regex)
       const linkRegex = /(https?:\/\/[^\s<>"]+[^\s<>",.!?()])/g;
-      const links = Array.from(new Set((body.match(linkRegex) || []).map(link => link.trim()))).slice(0, 10);
+      const rawLinks = Array.from(new Set((body.match(linkRegex) || []).map(link => link.trim())));
+
+      // Unwrap URL defense and other link protection services
+      const unwrapLink = (link) => {
+        // Handle urldefense.com/v3/__ACTUAL_URL__...
+        const urldefenseMatch = link.match(/urldefense\.com\/v3\/__([^_]+)__/);
+        if (urldefenseMatch) {
+          return decodeURIComponent(urldefenseMatch[1]);
+        }
+        // Handle other common wrappers here if needed
+        return link;
+      };
+
+      const links = rawLinks.map(unwrapLink).slice(0, 10);
 
       const is_read = !labelIds.includes('UNREAD');
       const is_starred = labelIds.includes('STARRED');
