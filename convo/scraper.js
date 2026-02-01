@@ -6,6 +6,10 @@ export async function fetchEmails(maxResults = 100) {
   const gmail = google.gmail({ version: 'v1', auth });
 
   try {
+    // Get user's email address for has_reply detection
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    const userEmail = profile.data.emailAddress;
+
     // Get list of message IDs
     const res = await gmail.users.messages.list({
       userId: 'me',
@@ -21,6 +25,7 @@ export async function fetchEmails(maxResults = 100) {
       const email = await gmail.users.messages.get({
         userId: 'me',
         id: message.id,
+        format: 'full' // Get complete metadata including labels
       });
 
       const headers = email.data.payload.headers;
@@ -39,13 +44,63 @@ export async function fetchEmails(maxResults = 100) {
         }
       }
 
+      // Extract label-based behavior signals
+      const labelIds = email.data.labelIds || [];
+      const is_read = !labelIds.includes('UNREAD');
+      const is_starred = labelIds.includes('STARRED');
+      const is_deleted = labelIds.includes('TRASH');
+      const is_important = labelIds.includes('IMPORTANT');
+      const is_archived = !labelIds.includes('INBOX') && !labelIds.includes('TRASH');
+
+      // Get internal date (when Gmail received the email)
+      const internal_date = parseInt(email.data.internalDate);
+      
+      // Calculate days_unread if email is unread
+      let days_unread = null;
+      if (!is_read) {
+        const now = Date.now();
+        days_unread = (now - internal_date) / (1000 * 60 * 60 * 24); // Convert ms to days
+      }
+
+      // Check if user has replied in this thread
+      let has_reply = false;
+      if (email.data.threadId) {
+        try {
+          const thread = await gmail.users.threads.get({
+            userId: 'me',
+            id: email.data.threadId
+          });
+          
+          // Check if any message in thread is from user
+          has_reply = thread.data.messages.some(msg => {
+            const msgFrom = msg.payload.headers.find(h => h.name === 'From')?.value || '';
+            return msgFrom.includes(userEmail);
+          });
+        } catch (error) {
+          console.error(`Error checking thread ${email.data.threadId}:`, error.message);
+        }
+      }
+
       emails.push({
         id: message.id,
         subject,
         from,
         date,
         body: body.slice(0, 1000), // Limit body length
-        timestamp: new Date(date).getTime()
+        timestamp: new Date(date).getTime(),
+        
+        // New behavior signals for training
+        is_read,
+        is_starred,
+        is_deleted,
+        is_important,
+        is_archived,
+        labels: labelIds,
+        thread_id: email.data.threadId || null,
+        internal_date,
+        days_unread,
+        has_reply,
+        last_synced: Date.now()
       });
     }
 

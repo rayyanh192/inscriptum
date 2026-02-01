@@ -1,75 +1,212 @@
-# Email Agent - Usage Guide
+# Self-Learning Email Agent
 
-## Setup Complete ✅
+An AI-powered email assistant that learns from your Gmail behavior patterns to intelligently manage your inbox.
 
-All files are ready and the agent is working!
+## Features
 
-## Files Created
+### 🧠 Self-Learning
+- Learns what emails are important to you from starred, archived, and deleted patterns
+- Adapts to your communication style by analyzing your replies
+- Improves predictions based on your feedback
 
-- `__init__.py` - Weave initialization
-- `agent.py` - Main entry point with `handle_email()`
-- `decisions.py` - LLM-powered intent analysis and decision making
-- `execution.py` - Firebase operations for storing decisions
-- `test_agent.py` - Test script
-- `requirements.txt` - Python dependencies
-- `.env` - Environment variables (already configured)
-- `.env.example` - Template for environment variables
+### 👥 People Graphing
+- Maps relationships from email history
+- Categorizes contacts (work, personal, marketing, etc.)
+- Tracks importance scores per sender
+- Clusters relationships for better context
 
-## How to Run
+### 📊 Importance Prediction
+- Multi-signal importance scoring:
+  - Person importance (from relationship history)
+  - Gmail signals (starred, important, deleted)
+  - Learned patterns (domain associations)
+  - Content urgency (deadlines, action items)
+  - Recency factor
 
-### Test the Agent
+### ✍️ Response Generation
+- Learns your writing style (tone, formality, phrases)
+- Generates contextual responses matching your style
+- Quick reply suggestions
+- Style adaptation per recipient
+
+### 📈 Weave Tracing
+- Full observability with W&B Weave
+- Traces every decision for debugging
+- Feedback loops for continuous improvement
+
+## Architecture
+
+```
+agent/
+├── __init__.py          # Weave + Firebase initialization
+├── agent.py             # Main orchestrator
+├── bootstrap.py         # Cold-start learning
+├── people_graph.py      # Relationship mapping
+├── style_learning.py    # Communication style analysis
+├── importance.py        # Importance prediction
+├── response_generator.py # Reply generation
+├── decisions.py         # Action selection
+├── execution.py         # Firebase operations
+├── feedback.py          # Learning loops
+└── test_full_agent.py   # Test suite
+```
+
+## Setup
+
+### 1. Install Dependencies
+
 ```bash
 cd agent
-../.venv/bin/python test_agent.py
+pip install -r requirements.txt
 ```
 
-### Use in Your Code
+### 2. Environment Variables
+
+Create `.env` file:
+
+```env
+WANDB_API_KEY=your_wandb_key
+GROQ_API_KEY=your_groq_key
+```
+
+### 3. Firebase Service Account
+
+Place `firebase-service-account.json` in the `agent/` folder.
+
+### 4. Run the Gmail Scraper (convo/)
+
+First, sync your Gmail data:
+
+```bash
+cd convo
+npm install
+node data.js
+```
+
+This populates Firebase `emails/` collection with behavior metadata.
+
+## Usage
+
+### Initialize Agent (Cold Start)
+
 ```python
-from agent import handle_email
+import asyncio
+import weave
+weave.init('email-agent')
 
-# Process an email
-result = await handle_email(
-    email_id='email_123',
-    email_data={
-        'from': 'sender@example.com',
-        'subject': 'Email subject',
-        'body': 'Email body text...',
-        'links': ['https://example.com'],
-        'category': 'newsletter'
-    }
-)
+from agent import initialize_agent
 
-print(f"Action: {result['action']}")
-print(f"Confidence: {result['confidence']}")
+async def main():
+    result = await initialize_agent()
+    print(result)
+
+asyncio.run(main())
 ```
 
-## Decision Types
+### Process Inbox
 
-- **`auto`** - High confidence (>0.8), safe to execute automatically
-- **`ask`** - Medium confidence (0.5-0.8) or risky, ask user first  
-- **`notify`** - Low confidence (<0.5) or informational, just notify
+```python
+from agent import process_inbox
 
-## Firebase Collection
+async def main():
+    result = await process_inbox(limit=10)
+    print(f"Processed {result['total_processed']} emails")
 
-Decisions are stored in `agent_decisions` collection with:
-- Email details (from, subject, category)
-- Intent analysis (intent, confidence, entities)
-- Decision (action, reason, risk_level)
-- Metadata (timestamp, processed flag)
+asyncio.run(main())
+```
 
-## Weave Tracing
+### Process Single Email
 
-Each email creates one trace with child operations:
-1. `handle_email` - Main entry point
-2. `analyze_email_intent` - LLM intent analysis
-3. `decide_action` - Decision making
-4. `store_decision` - Firebase storage
+```python
+from agent import process_email
 
-To view traces, log in to W&B: https://wandb.ai/
+email = {
+    "id": "email_123",
+    "from": "sender@example.com",
+    "subject": "Important meeting",
+    "snippet": "Let's meet tomorrow...",
+    "is_read": False,
+    "is_starred": False,
+    # ... other fields
+}
 
-## Next Steps
+result = await process_email(email)
+print(result['decision'])
+```
 
-Integrate with Discord bot to:
-1. Poll `agent_decisions` collection for new decisions
-2. Display decisions to users in Discord
-3. Collect user feedback and update Firebase
+### Get Agent Status
+
+```python
+from agent import get_agent_status
+
+status = await get_agent_status()
+print(f"People profiles: {status['statistics']['people_profiles']}")
+print(f"Decisions made: {status['statistics']['decisions_made']}")
+```
+
+## Firebase Collections
+
+| Collection | Purpose |
+|------------|---------|
+| `emails/` | Raw emails from Gmail scraper |
+| `people/` | Person profiles with relationship data |
+| `agent_decisions/` | Decisions for Discord bot |
+| `generated_responses/` | Generated reply drafts |
+| `training_feedback/` | Feedback for learning |
+| `learned_patterns/` | Importance and style patterns |
+| `relationship_clusters/` | Grouped relationships |
+
+## Testing
+
+```bash
+cd agent
+python test_full_agent.py
+```
+
+## W&B Weave Dashboard
+
+View traces at: https://wandb.ai/YOUR_ENTITY/email-agent/weave
+
+All operations are decorated with `@weave.op()` for full observability.
+
+## Learning Loop
+
+1. **Bootstrap**: Initial learning from Gmail history
+2. **Process**: Analyze emails using learned models
+3. **Decide**: Make action recommendations
+4. **Feedback**: Record user corrections
+5. **Improve**: Update models from feedback
+
+## Actions
+
+| Action | When Used |
+|--------|-----------|
+| `respond` | High importance, requires reply |
+| `star` | Important but not urgent |
+| `archive` | Low priority, already handled |
+| `delete` | Spam, unwanted |
+| `ask` | Uncertain, needs user input |
+| `notify` | FYI only |
+
+## Discord Integration
+
+The Discord bot reads from `agent_decisions/` collection:
+
+```javascript
+// In Discord bot
+const decisions = await db.collection('agent_decisions')
+  .where('processed', '==', false)
+  .get();
+
+// Display to user, then mark as processed
+await db.collection('agent_decisions')
+  .doc(decisionId)
+  .update({ processed: true });
+```
+
+## Contributing
+
+1. All new functions should use `@weave.op()` decorator
+2. Use `.get()` for all dictionary field access
+3. Handle errors gracefully with fallbacks
+4. Add tests for new functionality

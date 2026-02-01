@@ -35,8 +35,7 @@ async function processEmails() {
   console.log('🚀 Starting email processing...');
   
   // Fetch emails
-  const emails = await fetchEmails(10); // Adjust number as needed
-  
+  const emails = await fetchEmails(50); // Process 50 emails for better learning data
   console.log(`📊 Processing ${emails.length} emails...`);
   
   for (const email of emails) {

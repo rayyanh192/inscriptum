@@ -1,7 +1,19 @@
 # Email Agent - Python Requirements
 
+# Core
 weave>=0.50.0
 wandb>=0.16.0
 firebase-admin>=6.0.0
 python-dotenv>=1.0.0
 groq>=0.4.0
+
+# People Graphing & ML
+scikit-learn>=1.3.0
+numpy>=1.24.0
+sentence-transformers>=2.2.0
+
+# Async support
+aiohttp>=3.8.0
+
+# Date/time handling
+python-dateutil>=2.8.0
