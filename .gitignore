@@ -1,0 +1,35 @@
+# Environment variables
+.env
+*.env
+!.env.example
+
+# Firebase credentials
+firebase-service-account.json
+
+# Node
+node_modules/
+package-lock.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# OAuth tokens
+token.json
+
+# Test results
+test_results_*.json
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/

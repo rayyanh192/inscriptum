@@ -1,0 +1,7 @@
+# Email Agent - Python Requirements
+
+weave>=0.50.0
+wandb>=0.16.0
+firebase-admin>=6.0.0
+python-dotenv>=1.0.0
+groq>=0.4.0
